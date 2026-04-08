@@ -1,4 +1,4 @@
-# xiaozhi-server-lite 依赖
+# xiaoyun-lite 依赖
 
 # ===== 核心依赖 =====
 websockets==14.2

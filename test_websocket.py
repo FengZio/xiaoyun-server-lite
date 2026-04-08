@@ -1,5 +1,5 @@
 """
-xiaozhi-server-lite WebSocket 连接测试
+xiaoyun-lite WebSocket 连接测试
 测试 WebSocket 连接、文本聊天和基本功能
 """
 
@@ -13,7 +13,7 @@ async def test_websocket_connection():
     uri = "ws://localhost:8000/xiaozhi/v1/"
     
     print("=" * 60)
-    print("xiaozhi-server-lite WebSocket 测试")
+    print("xiaoyun-lite WebSocket 测试")
     print("=" * 60)
     print(f"连接地址: {uri}\n")
     
@@ -100,7 +100,7 @@ async def test_websocket_connection():
     except websockets.exceptions.ConnectionRefused:
         print("❌ 连接被拒绝")
         print("请确保:")
-        print("  1. xiaozhi-server-lite 已启动 (python app.py)")
+        print("  1. xiaoyun-lite 已启动 (python app.py)")
         print("  2. 端口 8000 可用")
         print("  3. 配置文件正确")
         sys.exit(1)

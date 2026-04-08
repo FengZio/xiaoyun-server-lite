@@ -1,6 +1,6 @@
-# xiaozhi-server-lite
+# xiaoyun-lite
 
-轻量级 AI 对话服务器,从 xiaozhi-server 剥离核心功能并整合音频情感分析。
+轻量级 AI 对话服务器，项目源自 `xiaozhi-server`，在此基础上演进为 `xiaoyun-lite` 并整合音频情感分析。
 
 ## ✨ 特性
 
@@ -49,7 +49,7 @@ python app.py
 ## 📁 目录结构
 
 ```
-xiaozhi-server-lite/
+xiaoyun-lite/
 ├── app.py                      # 主入口
 ├── config.yaml                 # 配置文件
 ├── requirements.txt
@@ -195,7 +195,7 @@ python test_audio_analysis.py
 
 ## 🔧 与原版对比
 
-| 特性 | 原版 xiaozhi-server | xiaozhi-server-lite |
+| 特性 | 原版 xiaozhi-server | xiaoyun-lite |
 |------|---------------------|---------------------|
 | WebSocket | ✅ | ✅ |
 | AI Provider | ✅ | ✅ (完整保留) |
@@ -218,7 +218,7 @@ python test_audio_analysis.py
 ```
 UniApp 前端 (manager-mobile)
     ↓ WebSocket
-xiaozhi-server-lite
+xiaoyun-lite
     ↓ HTTP
 Server B (unified-music-service + llm-service)
     ↓ HTTP
@@ -245,7 +245,7 @@ A: 支持 mp3, wav, flac, opus 等所有 librosa 支持的格式。
 
 ## 🙏 致谢
 
-- 原始 xiaozhi-server 项目
+- 原始 `xiaozhi-server` 项目
 - MobileNet 音频分析算法
 - Server B 统一音乐服务
 
