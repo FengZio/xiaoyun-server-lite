@@ -1,0 +1,32 @@
+# Local configuration with secrets
+config.yaml
+.env
+.env.*
+
+# Python cache and virtualenvs
+__pycache__/
+*.py[cod]
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.venv/
+venv/
+
+# Runtime output
+logs/
+tmp/
+*.log
+data/.config.yaml
+data/.episodic_memory.replay.yaml
+data/.stable_memory.replay.yaml
+
+# Local backups and editor files
+*.backup
+*.bak
+*.swp
+*.swo
+.vscode/
+
+# OS files
+.DS_Store
+Thumbs.db

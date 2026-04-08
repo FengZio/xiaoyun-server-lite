@@ -1,0 +1,231 @@
+# ==========================================
+# xiaozhi-server-lite 配置文件
+# 简化版 - 移除硬件相关配置
+# ==========================================
+
+# ==========================================
+# 服务器配置
+# ==========================================
+server:
+  host: 0.0.0.0
+  port: 8000  # WebSocket 端口
+  auth_key: ""  # 留空将自动生成,建议手动设置固定值
+
+# ==========================================
+# AI 模块选择
+# ==========================================
+selected_module:
+  LLM: "LLM_zhipu"          # 智谱AI (推荐,有免费额度)
+  TTS: "TTS_edgetts"        # Edge TTS (免费)
+  ASR: "ASR_openai"         # OpenAI Whisper (可选)
+  Memory: "Memory_local_short"
+  Intent: "Intent_nointent"
+  VAD: "VAD_silero"
+
+# ==========================================
+# LLM 配置
+# ==========================================
+LLM:
+  # 智谱AI GLM-4 (推荐)
+  LLM_zhipu:
+    type: zhipu
+    api_key: "你的智谱AI密钥"  # https://open.bigmodel.cn
+    model: "glm-4-flash"
+    temperature: 0.8
+    max_tokens: 2000
+  
+  # OpenAI GPT
+  LLM_openai:
+    type: openai
+    api_key: "你的OpenAI密钥"
+    model: "gpt-4o-mini"
+    base_url: "https://api.openai.com/v1"
+    temperature: 0.7
+  
+  # Google Gemini
+  LLM_gemini:
+    type: gemini
+    api_key: "你的Gemini密钥"
+    model: "gemini-2.0-flash-exp"
+
+# ==========================================
+# TTS 配置
+# ==========================================
+TTS:
+  # Edge TTS (推荐,免费)
+  TTS_edgetts:
+    type: edge_tts
+    voice: "zh-CN-XiaoxiaoNeural"  # 女声
+    # 其他选项: zh-CN-YunxiNeural (男声)
+    rate: "+0%"
+    volume: "+0%"
+    pitch: "+0Hz"
+
+  # Xiaomi MiMo TTS
+  TTS_xiaomimimo:
+    type: xiaomimimo
+    api_url: "https://platform.xiaomimimo.com/open/v1/audio/speech"
+    api_key: "你的小米MiMo密钥"
+    model: "mimo-v2-tts"
+    voice: ""
+    format: "mp3"
+    timeout: 60
+
+# ==========================================
+# ASR 配置
+# ==========================================
+ASR:
+  # OpenAI Whisper
+  ASR_openai:
+    type: openai
+    api_key: "你的OpenAI密钥"
+    model: "whisper-1"
+    language: "zh"
+  
+  # FunASR 本地识别
+  ASR_funasr:
+    type: fun_local
+    model_path: "./models/SenseVoiceSmall/"
+    device: "cuda"  # 或 cpu
+    hub: "ms"
+
+# ==========================================
+# VAD 配置
+# ==========================================
+VAD:
+  VAD_silero:
+    type: silero
+    threshold: 0.5
+
+# ==========================================
+# 记忆配置
+# ==========================================
+Memory:
+  Memory_local_short:
+    type: mem_local_short
+    max_turns: 10
+
+# ==========================================
+# 意图识别配置
+# ==========================================
+Intent:
+  Intent_nointent:
+    type: nointent
+
+# ==========================================
+# 系统提示词
+# ==========================================
+prompt: |
+  你是小云，是一个长期陪伴型聊天对象。
+  你要先理解用户感受，再推进建议。
+  不做心理诊断，不贴人格标签，不替代专业帮助。
+  回复自然口语化，简洁但有温度。
+
+# ==========================================
+# 陪伴人设配置
+# ==========================================
+companion:
+  enabled: true
+  assistant_name: "小云"
+  relationship: "长期陪伴聊天对象"
+  speaking_style: "温柔、自然、口语化"
+  response_length: "默认2-4句，优先简洁"
+  safety_boundary: "不做诊断，不越权，不提供违法危险建议。"
+
+# ==========================================
+# 对话策略层配置 (Dialogue Policy)
+# ==========================================
+dialogue_policy:
+  enabled: true
+  max_memory_items: 3
+  enable_stable_memory: true
+  enable_micro_skills: true
+  enable_music_hypothesis: true
+  emit_events: true
+
+# ==========================================
+# 音频情感分析配置 (新增)
+# ==========================================
+audio_emotion:
+  # 是否启用音频情感分析
+  enabled: true
+  
+  # MobileNet 模型路径 (如果不存在,将使用MFCC备用)
+  model_path: "./ai_engine/audio_analysis/models/mobilenet_quantized/model_mobile.ptl"
+  
+  # 推理设备
+  device: "cpu"  # cpu 或 cuda
+  
+  # 备用分析方法
+  fallback: "mfcc"  # mfcc 或 none
+  
+  # 是否将情感注入对话上下文
+  inject_to_context: true
+
+# ==========================================
+# Server B 集成配置 (新增)
+# ==========================================
+integration:
+  # 统一音乐服务 URL
+  unified_service_url: "https://tag.zrj666.cn"
+  
+  # LLM 服务 URL
+  llm_service_url: "https://llm.zrj666.cn"
+  
+  # 是否启用用户画像注入
+  enable_persona: true
+  
+  # 画像缓存时间 (秒)
+  persona_cache_ttl: 300
+
+# ==========================================
+# WebSocket 配置
+# ==========================================
+websocket:
+  # 支持音频流
+  enable_audio: true
+  
+  # 音频格式
+  audio_format: "opus"  # opus, pcm, wav
+  
+  # 启用语音回复
+  enable_voice_reply: false  # true 则调用 TTS
+  
+  # 连接超时 (秒)
+  close_connection_no_voice_time: 120
+
+# ==========================================
+# 欢迎消息
+# ==========================================
+xiaozhi:
+  welcome: "你好,我是小智,很高兴为你服务!"
+
+# ==========================================
+# 退出命令
+# ==========================================
+exit_commands:
+  - "退出"
+  - "再见"
+  - "拜拜"
+
+# ==========================================
+# 日志配置
+# ==========================================
+logging:
+  level: "INFO"  # DEBUG, INFO, WARNING, ERROR
+  format: "%(asctime)s - %(levelname)s - %(message)s"
+
+# ==========================================
+# 高级配置 (可选)
+# ==========================================
+# 是否从 API 读取配置 (设置为 false)
+read_config_from_api: false
+
+# 是否删除音频文件
+delete_audio: true
+
+# 是否启用TTS语音合成（纯软件文本场景可关闭）
+enable_tts: false
+
+# MCP 接入点 (可选)
+# mcp_endpoint: "你的接入点 websocket地址"

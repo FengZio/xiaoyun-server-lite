@@ -1,0 +1,30 @@
+
+# ============================================
+# 智控台配置（用于获取智能体配置）
+# ============================================
+manager-api:
+  url: http://xiaozhi-esp32-server-web:8002/xiaozhi
+  secret: "your-manager-secret"
+  timeout: 30
+  max_retries: 6
+  retry_delay: 10
+
+# ============================================
+# 本地服务器配置（优先级高于智控台）
+# ============================================
+server:
+  ip: 0.0.0.0
+  port: 8000
+  http_port: 8003
+  websocket: ws://182.254.228.131:8000/xiaozhi/v1/
+  vision_explain: http://182.254.228.131:8003/mcp/vision/explain
+  auth_key: "your-auth-key"
+  auth:
+    enabled: false
+
+# ============================================
+# UniApp 音频配置
+# ============================================
+uniapp_audio_dir: data/uniapp_audio
+uniapp_audio_base_url: http://182.254.228.131:8003/audio
+

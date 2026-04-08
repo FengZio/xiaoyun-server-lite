@@ -1,0 +1,51 @@
+{
+  "cases": [
+    {
+      "case_id": "followup_priority_demo",
+      "user_id": "demo_user_001",
+      "turns": [
+        {
+          "user": "以后叫我小宇，回复短一点，别鸡汤，别提前任。"
+        },
+        {
+          "user": "今天王者又掉分了，这事我们明天再聊。",
+          "assistant": "明白了，我们先不硬上，明天我再跟你复盘。"
+        },
+        {
+          "user": "我现在还是想知道王者上分怎么做。",
+          "expect": {
+            "first_source": "episodic",
+            "first_prefix": "未完话题:",
+            "must_include": [
+              "未完话题:"
+            ]
+          }
+        },
+        {
+          "user": "这个事已经解决了，不用再跟进。",
+          "assistant": "收到，那这个话题我先关闭。"
+        }
+      ]
+    },
+    {
+      "case_id": "music_soft_confirmation_demo",
+      "user_id": "demo_user_002",
+      "music_signals": {
+        "source": "replay_fixture",
+        "has_recent_music_activity": true,
+        "low_arousal_ratio": 0.72,
+        "negative_ratio": 0.61,
+        "recent_play_count": 18,
+        "top_song_title": "夜色温柔"
+      },
+      "turns": [
+        {
+          "user": "今天有点没状态。"
+        },
+        {
+          "user": "我也说不清为什么。"
+        }
+      ]
+    }
+  ]
+}
