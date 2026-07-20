@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import json
+import time
 from typing import Any
+
+import websockets
 
 
 def extract_timeline(events: list[dict[str, Any]]) -> dict[str, int | None]:
@@ -19,3 +24,24 @@ def extract_timeline(events: list[dict[str, Any]]) -> dict[str, int | None]:
 
 def _elapsed(timestamp: int | None, sent_at: int) -> int | None:
     return None if timestamp is None else int(timestamp - sent_at)
+
+
+async def run_ws_case(case: dict[str, Any], endpoint: str, timeout_s: float) -> dict[str, Any]:
+    device_id = f"ablation_{case['case_id']}_{int(time.time() * 1000)}"
+    events: list[dict[str, Any]] = [{"kind": "sent", "at_ms": 0}]
+    started = time.perf_counter()
+    async with websockets.connect(endpoint, additional_headers={"device-id": device_id, "client-id": "ablation"}) as websocket:
+        await websocket.send(json.dumps({"type": "chat", "content": case["input_text"], "enable_audio": case.get("enable_audio", False)}))
+        while True:
+            raw = await asyncio.wait_for(websocket.recv(), timeout=timeout_s)
+            message = json.loads(raw)
+            at_ms = round((time.perf_counter() - started) * 1000)
+            if message.get("type") != "reply":
+                continue
+            if message.get("state") == "start":
+                events.append({"kind": "text", "at_ms": at_ms})
+            if message.get("audio_url"):
+                events.append({"kind": "audio", "at_ms": at_ms})
+            if message.get("state") in {"end", "error"}:
+                events.append({"kind": "completed", "at_ms": at_ms})
+                return {"status": "ok" if message.get("state") == "end" else "error", "events": events, **extract_timeline(events), "reply": message.get("text", "")}
