@@ -7,6 +7,17 @@ import asyncio
 import websockets
 import json
 import sys
+import os
+import pytest
+
+
+pytestmark = [
+    pytest.mark.asyncio,
+    pytest.mark.skipif(
+        os.getenv("RUN_WEBSOCKET_INTEGRATION") != "1",
+        reason="需要运行中的 WebSocket 集成环境",
+    ),
+]
 
 async def test_websocket_connection():
     """测试 WebSocket 连接和基本对话"""
