@@ -31,7 +31,10 @@ async def run_ws_case(case: dict[str, Any], endpoint: str, timeout_s: float) -> 
     events: list[dict[str, Any]] = [{"kind": "sent", "at_ms": 0}]
     started = time.perf_counter()
     async with websockets.connect(endpoint, additional_headers={"device-id": device_id, "client-id": "ablation"}) as websocket:
-        await websocket.send(json.dumps({"type": "chat", "content": case["input_text"], "enable_audio": case.get("enable_audio", False)}))
+        message = {"type": "chat", "content": case["input_text"], "enable_audio": case.get("enable_audio", False)}
+        if case.get("agent_id"):
+            message["agent_id"] = case["agent_id"]
+        await websocket.send(json.dumps(message))
         while True:
             raw = await asyncio.wait_for(websocket.recv(), timeout=timeout_s)
             message = json.loads(raw)
