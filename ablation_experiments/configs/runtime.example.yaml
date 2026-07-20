@@ -1,6 +1,8 @@
 ws_url: ws://127.0.0.1:8000/xiaozhi/v1/
 service_b_url: http://127.0.0.1:8003
 service_a_url: http://127.0.0.1:8004
+manager_api_url: http://127.0.0.1:8002/xiaoyun
+agent_id: db2bc87d21764c128b96711f948aa049
 request_timeout_s: 45
 mysql:
   host: 127.0.0.1

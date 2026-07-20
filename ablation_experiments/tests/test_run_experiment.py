@@ -3,6 +3,8 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 
 SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
@@ -37,6 +39,25 @@ def test_run_group_writes_snapshot_and_records(tmp_path: Path, monkeypatch) -> N
 
     assert (run_dir / "config_snapshot.json").is_file()
     assert '"group_id":"D0"' in (run_dir / "ws_records.jsonl").read_text(encoding="utf-8")
+
+
+def test_run_group_restores_manager_baseline_after_probe_error(tmp_path: Path, monkeypatch) -> None:
+    matrix_path = tmp_path / "groups.yaml"
+    matrix_path.write_text("baseline: {}\ngroups:\n  D1:\n    overrides:\n      dialogue_policy:\n        enabled: false\n", encoding="utf-8")
+    cases_path = tmp_path / "cases.jsonl"
+    cases_path.write_text('{"case_id":"c1","input_text":"hello"}\n', encoding="utf-8")
+    calls = []
+
+    class Api:
+        def read_params(self): return {"dialogue_policy.enabled": {"id": 1, "paramCode": "dialogue_policy.enabled", "paramValue": "true", "valueType": "boolean"}}
+        def apply_overrides(self, baseline, overrides): calls.append(("apply", overrides))
+        def restore(self, baseline): calls.append(("restore", baseline))
+
+    monkeypatch.setattr(run_experiment, "run_ws_case", lambda *_: (_ for _ in ()).throw(RuntimeError("probe")))
+    with pytest.raises(RuntimeError):
+        run_experiment.run_group("D1", {"ws_url": "ws://test"}, matrix_path, cases_path, tmp_path, "run", manager_api=Api())
+    assert calls[0] == ("apply", {"dialogue_policy.enabled": False})
+    assert calls[1][0] == "restore"
 
 
 def test_main_run_dispatches_group(tmp_path: Path, monkeypatch) -> None:
