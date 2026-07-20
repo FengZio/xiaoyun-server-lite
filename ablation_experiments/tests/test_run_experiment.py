@@ -37,3 +37,12 @@ def test_run_group_writes_snapshot_and_records(tmp_path: Path, monkeypatch) -> N
 
     assert (run_dir / "config_snapshot.json").is_file()
     assert '"group_id":"D0"' in (run_dir / "ws_records.jsonl").read_text(encoding="utf-8")
+
+
+def test_main_run_dispatches_group(tmp_path: Path, monkeypatch) -> None:
+    runtime_path = tmp_path / "runtime.yaml"
+    runtime_path.write_text("ws_url: ws://test\nservice_b_url: http://service-b\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "argv", ["run_experiment.py", "run", "--runtime", str(runtime_path), "--group", "D0"])
+    monkeypatch.setattr(run_experiment, "run_group", lambda *_: tmp_path / "run")
+
+    assert run_experiment.main() == 0

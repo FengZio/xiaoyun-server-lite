@@ -44,14 +44,29 @@ def run_group(group_id: str, runtime: dict[str, Any], matrix_path: Path, cases_p
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("command", choices=["preflight"])
+    parser.add_argument("command", choices=["preflight", "run"])
     parser.add_argument("--runtime", required=True, type=Path)
+    parser.add_argument("--group")
     args = parser.parse_args()
     runtime = yaml.safe_load(args.runtime.read_text(encoding="utf-8")) or {}
     errors = preflight(runtime)
     if errors:
         print("missing: " + ", ".join(errors))
         return 1
+    if args.command == "run":
+        if not args.group:
+            parser.error("--group is required for run")
+        root = Path(__file__).resolve().parents[1]
+        run_dir = run_group(
+            args.group,
+            runtime,
+            root / "configs" / "groups.yaml",
+            root / "datasets" / "dialogue_cases.jsonl",
+            root / "raw",
+            datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
+        )
+        print(run_dir)
+        return 0
     print("ok " + datetime.now(timezone.utc).isoformat())
     return 0
 
