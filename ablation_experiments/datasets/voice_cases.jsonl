@@ -1,0 +1,6 @@
+{"case_id":"voice_short_01","category":"short","input_text":"今天有点累。","enable_audio":true}
+{"case_id":"voice_short_02","category":"short","input_text":"陪我说两句吧。","enable_audio":true}
+{"case_id":"voice_medium_01","category":"medium","input_text":"我今天开会时说错话了，一直在想别人会不会觉得我很差。","enable_audio":true}
+{"case_id":"voice_medium_02","category":"medium","input_text":"我想把任务拆小一点，但不知道应该从哪里开始。","enable_audio":true}
+{"case_id":"voice_long_01","category":"long","input_text":"最近论文、实习和家里的事情撞在一起，我知道应该一件件处理，但还是很焦虑，晚上也睡不好。","enable_audio":true}
+{"case_id":"voice_long_02","category":"long","input_text":"我想聊聊这周发生的事，不需要你替我下结论，只要帮我把思路慢慢理顺就可以。","enable_audio":true}
