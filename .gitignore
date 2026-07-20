@@ -26,6 +26,7 @@ data/.stable_memory.replay.yaml
 *.swp
 *.swo
 .vscode/
+.worktrees/
 
 # OS files
 .DS_Store
