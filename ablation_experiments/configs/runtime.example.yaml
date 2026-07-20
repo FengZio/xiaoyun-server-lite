@@ -1,0 +1,10 @@
+ws_url: ws://127.0.0.1:8000/xiaozhi/v1/
+service_b_url: http://127.0.0.1:8003
+service_a_url: http://127.0.0.1:8004
+request_timeout_s: 45
+mysql:
+  host: 127.0.0.1
+  port: 3306
+  database: music_tag_db
+  user_env: MYSQL_USER
+  password_env: MYSQL_PASSWORD

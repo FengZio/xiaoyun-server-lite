@@ -1,0 +1,86 @@
+baseline:
+  dialogue_policy:
+    enabled: true
+    enable_stable_memory: true
+    enable_music_hypothesis: true
+    enable_soft_confirmation: true
+  integration:
+    enable_persona: true
+    persona_cache_ttl: 300
+  audio_emotion:
+    enabled: true
+    sync_wait: false
+  sentence_pipeline:
+    enabled: true
+    max_tts_workers: 2
+    max_pending_sentences: 4
+    max_pending_audio_jobs: 3
+
+groups:
+  D0:
+    description: complete dialogue intelligence baseline
+    overrides: {}
+  D1:
+    description: dialogue policy disabled
+    overrides:
+      dialogue_policy:
+        enabled: false
+  D2:
+    description: stable and episodic memory disabled
+    overrides:
+      dialogue_policy:
+        enable_stable_memory: false
+  D3:
+    description: persona and music hypothesis disabled
+    overrides:
+      dialogue_policy:
+        enable_music_hypothesis: false
+      integration:
+        enable_persona: false
+  D4:
+    description: soft confirmation disabled
+    overrides:
+      dialogue_policy:
+        enable_soft_confirmation: false
+  V0:
+    description: complete sentence pipeline baseline
+    overrides: {}
+  V1:
+    description: sentence pipeline disabled
+    overrides:
+      sentence_pipeline:
+        enabled: false
+  V2:
+    description: serial TTS
+    overrides:
+      sentence_pipeline:
+        max_tts_workers: 1
+  V3:
+    description: constrained sentence and audio queues
+    overrides:
+      sentence_pipeline:
+        max_pending_sentences: 1
+        max_pending_audio_jobs: 1
+  S0:
+    description: complete asynchronous service baseline
+    overrides: {}
+  S1:
+    description: synchronous audio analysis
+    overrides:
+      audio_emotion:
+        sync_wait: true
+  S2:
+    description: persona cache disabled
+    overrides:
+      integration:
+        persona_cache_ttl: 0
+  S3:
+    description: audio emotion analysis disabled
+    overrides:
+      audio_emotion:
+        enabled: false
+  S4:
+    description: test-only fault injection
+    overrides:
+      fault_proxy:
+        enabled: true
