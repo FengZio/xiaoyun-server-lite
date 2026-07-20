@@ -1,7 +1,11 @@
 from __future__ import annotations
 
 import random
+import json
+import os
 from typing import Any
+
+from openai import OpenAI
 
 
 DIMENSIONS = (
@@ -44,3 +48,24 @@ def validate_judgment(payload: dict[str, Any]) -> dict[str, Any] | None:
     if not isinstance(payload.get("reason"), str) or not isinstance(payload.get("invalid_case"), bool):
         return None
     return payload
+
+
+def judge_pair(case: dict[str, Any], reply_a: str, reply_b: str, invoke: Any) -> list[dict[str, Any]]:
+    request = build_judge_request(case, reply_a, reply_b, order_seed=7)
+    prompts = [request["prompt"], request["reverse_prompt"], build_judge_request(case, reply_a, reply_b, order_seed=19)["prompt"]]
+    results = []
+    for index, prompt in enumerate(prompts, start=1):
+        payload = validate_judgment(invoke(prompt))
+        results.append({"case_id": case["case_id"], "pass_index": index, "valid": payload is not None, "judgment": payload})
+    return results
+
+
+def invoke_openai(prompt: str) -> dict[str, Any]:
+    client = OpenAI(api_key=os.environ["OPENAI_API_KEY"])
+    response = client.chat.completions.create(
+        model=os.environ.get("GPT_JUDGE_MODEL", "gpt-4o-mini"),
+        temperature=0,
+        response_format={"type": "json_object"},
+        messages=[{"role": "user", "content": prompt}],
+    )
+    return json.loads(response.choices[0].message.content or "{}")
