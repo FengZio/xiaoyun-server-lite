@@ -5,6 +5,17 @@ from typing import Any
 import httpx
 
 
+def flatten_overrides(values: dict[str, Any], prefix: str = "") -> dict[str, Any]:
+    flattened: dict[str, Any] = {}
+    for key, value in values.items():
+        code = f"{prefix}.{key}" if prefix else key
+        if isinstance(value, dict):
+            flattened.update(flatten_overrides(value, code))
+        else:
+            flattened[code] = value
+    return flattened
+
+
 class ManagerApi:
     def __init__(self, base_url: str, token: str, transport: httpx.BaseTransport | None = None):
         self.client = httpx.Client(

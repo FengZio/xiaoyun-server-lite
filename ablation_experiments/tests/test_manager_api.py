@@ -31,3 +31,11 @@ def test_apply_and_restore_uses_parameter_identity() -> None:
     assert len(requests) == 3
     assert json.loads(requests[1].content)["paramValue"] == "false"
     assert json.loads(requests[2].content)["paramValue"] == "true"
+
+
+def test_flatten_overrides_uses_dot_separated_codes() -> None:
+    from manager_api import flatten_overrides
+
+    assert flatten_overrides({"dialogue_policy": {"enabled": False}}) == {
+        "dialogue_policy.enabled": False
+    }
