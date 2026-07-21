@@ -45,3 +45,18 @@ def test_judge_pair_runs_three_anonymous_orders() -> None:
 
     assert len(results) == 3
     assert {result["pass_index"] for result in results} == {1, 2, 3}
+
+
+def test_openai_client_uses_configured_base_url(monkeypatch) -> None:
+    captured = {}
+
+    class Client:
+        def __init__(self, **kwargs): captured.update(kwargs)
+
+    monkeypatch.setattr("gpt_judge.OpenAI", Client)
+    monkeypatch.setenv("OPENAI_API_KEY", "key")
+
+    from gpt_judge import build_openai_client
+    build_openai_client("https://gateway.example/v1")
+
+    assert captured["base_url"] == "https://gateway.example/v1"
