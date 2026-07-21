@@ -57,8 +57,13 @@ def judge_pair(case: dict[str, Any], reply_a: str, reply_b: str, invoke: Any) ->
     prompts = [request["prompt"], request["reverse_prompt"], build_judge_request(case, reply_a, reply_b, order_seed=19)["prompt"]]
     results = []
     for index, prompt in enumerate(prompts, start=1):
-        payload = validate_judgment(invoke(prompt))
-        results.append({"case_id": case["case_id"], "pass_index": index, "valid": payload is not None, "judgment": payload})
+        sources = request["labels"] if index == 1 else ({"first": request["labels"]["second"], "second": request["labels"]["first"]} if index == 2 else build_judge_request(case, reply_a, reply_b, order_seed=19)["labels"])
+        try:
+            payload = validate_judgment(invoke(prompt))
+            result = {"valid": payload is not None, "judgment": payload}
+        except Exception as error:
+            result = {"valid": False, "judgment": None, "error_type": type(error).__name__, "error_message": str(error)}
+        results.append({"case_id": case["case_id"], "pass_index": index, "prompt_a_source": sources["first"], "prompt_b_source": sources["second"], **result})
     return results
 
 

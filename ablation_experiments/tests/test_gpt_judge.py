@@ -52,6 +52,7 @@ def test_judge_pair_runs_three_anonymous_orders() -> None:
 
     assert len(results) == 3
     assert {result["pass_index"] for result in results} == {1, 2, 3}
+    assert all({"prompt_a_source", "prompt_b_source"} <= result.keys() for result in results)
 
 
 def test_openai_client_uses_configured_base_url(monkeypatch) -> None:

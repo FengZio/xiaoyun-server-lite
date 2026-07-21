@@ -9,7 +9,7 @@ SCRIPTS_DIR = Path(__file__).resolve().parents[1] / "scripts"
 if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
-from judge_runner import build_pairs
+from judge_runner import build_pairs, completed_case_ids
 
 
 def test_build_pairs_matches_same_case_id(tmp_path: Path) -> None:
@@ -21,3 +21,10 @@ def test_build_pairs_matches_same_case_id(tmp_path: Path) -> None:
     pairs = build_pairs(baseline, variant)
 
     assert pairs == [{"case_id": "c1", "reply_a": "base", "reply_b": "variant"}]
+
+
+def test_completed_case_ids_requires_three_records(tmp_path: Path) -> None:
+    path = tmp_path / "judgments.jsonl"
+    path.write_text("\n".join(json.dumps({"case_id": "c1"}) for _ in range(3)) + "\n", encoding="utf-8")
+
+    assert completed_case_ids(path) == {"c1"}
