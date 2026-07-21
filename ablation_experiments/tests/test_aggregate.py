@@ -13,17 +13,17 @@ from aggregate import aggregate_dialogue, aggregate_services, aggregate_voice
 
 def test_aggregate_voice_reports_first_audio_and_completion() -> None:
     result = aggregate_voice(
-        [{"status": "ok", "t_first_audio_ms": 200, "t_complete_ms": 700}]
+        [{"status": "ok", "t_first_audio_ms": 200, "t_reply_complete_ms": 700}]
     )
 
     assert result["t_first_audio_p50_ms"] == 200
-    assert result["t_complete_p50_ms"] == 700
+    assert result["t_reply_complete_p50_ms"] == 700
 
 
 def test_aggregate_dialogue_reports_completion_percentiles() -> None:
-    result = aggregate_dialogue([{"status": "ok", "t_complete_ms": 100}])
+    result = aggregate_dialogue([{"status": "ok", "t_reply_complete_ms": 100}])
 
-    assert result["t_complete_p50_ms"] == 100
+    assert result["t_reply_complete_p50_ms"] == 100
     assert result["success_rate"] == 1.0
 
 

@@ -21,9 +21,9 @@ def test_extract_timeline_tracks_first_audio_and_completion() -> None:
         ]
     )
 
-    assert metrics["t_first_token_ms"] == 120
+    assert metrics["t_first_visible_reply_ms"] == 120
     assert metrics["t_first_audio_ms"] == 260
-    assert metrics["t_complete_ms"] == 840
+    assert metrics["t_reply_complete_ms"] == 840
 
 
 def test_extract_timeline_returns_none_for_missing_audio() -> None:

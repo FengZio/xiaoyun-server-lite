@@ -16,9 +16,9 @@ def extract_timeline(events: list[dict[str, Any]]) -> dict[str, int | None]:
         if kind in first and first[kind] is None:
             first[kind] = event.get("at_ms")
     return {
-        "t_first_token_ms": _elapsed(first["text"], sent_at),
+        "t_first_visible_reply_ms": _elapsed(first["text"], sent_at),
         "t_first_audio_ms": _elapsed(first["audio"], sent_at),
-        "t_complete_ms": _elapsed(first["completed"], sent_at),
+        "t_reply_complete_ms": _elapsed(first["completed"], sent_at),
     }
 
 
