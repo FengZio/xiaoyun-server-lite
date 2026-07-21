@@ -22,8 +22,9 @@ DIMENSIONS = (
 def _prompt(reply_a: str, reply_b: str) -> str:
     dimensions = ", ".join(DIMENSIONS)
     return (
-        "You are an independent dialogue evaluator. Score each response from 1 to 5 for: "
-        f"{dimensions}. Return JSON with scores, winner (A/B/tie), reason, and invalid_case.\n"
+        "You are an independent dialogue evaluator. Score both responses independently from 1 to 5 for: "
+        f"{dimensions}. Return valid JSON only with scores_a, scores_b, winner (A/B/tie), reason, and invalid_case. "
+        "scores_a and scores_b must each contain exactly every listed dimension as a number from 1 to 5.\n"
         f"Response A:\n{reply_a}\n\nResponse B:\n{reply_b}"
     )
 
@@ -38,11 +39,12 @@ def build_judge_request(case: dict[str, Any], reply_a: str, reply_b: str, order_
 
 
 def validate_judgment(payload: dict[str, Any]) -> dict[str, Any] | None:
-    scores = payload.get("scores")
-    if not isinstance(scores, dict) or set(scores) != set(DIMENSIONS):
-        return None
-    if any(not isinstance(value, (int, float)) or not 1 <= value <= 5 for value in scores.values()):
-        return None
+    for score_key in ("scores_a", "scores_b"):
+        scores = payload.get(score_key)
+        if not isinstance(scores, dict) or set(scores) != set(DIMENSIONS):
+            return None
+        if any(not isinstance(value, (int, float)) or not 1 <= value <= 5 for value in scores.values()):
+            return None
     if payload.get("winner") not in {"A", "B", "tie"}:
         return None
     if not isinstance(payload.get("reason"), str) or not isinstance(payload.get("invalid_case"), bool):

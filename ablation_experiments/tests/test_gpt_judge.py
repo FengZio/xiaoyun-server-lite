@@ -20,9 +20,16 @@ def test_judge_request_hides_group_ids_and_reverses_order() -> None:
 
 
 def test_validate_judgment_rejects_out_of_range_scores() -> None:
-    payload = {"scores": {"empathy": 6}, "winner": "A", "reason": "x", "invalid_case": False}
+    payload = {"scores_a": {"empathy": 6}, "scores_b": {}, "winner": "A", "reason": "x", "invalid_case": False}
 
     assert validate_judgment(payload) is None
+
+
+def test_validate_judgment_accepts_independent_a_b_scores() -> None:
+    scores = {dimension: 4 for dimension in ("empathy", "relevance", "naturalness", "continuity", "non_preachiness", "safety_boundary", "personalization")}
+    payload = {"scores_a": scores, "scores_b": {**scores, "empathy": 3}, "winner": "A", "reason": "more empathetic", "invalid_case": False}
+
+    assert validate_judgment(payload) == payload
 
 
 def test_judge_pair_runs_three_anonymous_orders() -> None:
