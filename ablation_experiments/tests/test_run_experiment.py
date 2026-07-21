@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import json
 from pathlib import Path
 
 import pytest
@@ -58,6 +59,20 @@ def test_run_group_restores_manager_baseline_after_probe_error(tmp_path: Path, m
         run_experiment.run_group("D1", {"ws_url": "ws://test"}, matrix_path, cases_path, tmp_path, "run", manager_api=Api())
     assert calls[0] == ("apply", {"dialogue_policy.enabled": False})
     assert calls[1][0] == "restore"
+
+
+def test_run_group_records_probe_error_and_continues(tmp_path: Path, monkeypatch) -> None:
+    matrix_path = tmp_path / "groups.yaml"
+    matrix_path.write_text("baseline: {}\ngroups:\n  D0:\n    overrides: {}\n", encoding="utf-8")
+    cases_path = tmp_path / "cases.jsonl"
+    cases_path.write_text('{"case_id":"c1","input_text":"one"}\n{"case_id":"c2","input_text":"two"}\n', encoding="utf-8")
+    outcomes = iter([RuntimeError("network"), {"status": "ok", "t_complete_ms": 1}])
+    monkeypatch.setattr(run_experiment, "run_ws_case", lambda *_: next(outcomes))
+
+    run_dir = run_experiment.run_group("D0", {"ws_url": "ws://test"}, matrix_path, cases_path, tmp_path, "run")
+
+    records = [json.loads(line) for line in (run_dir / "ws_records.jsonl").read_text(encoding="utf-8").splitlines()]
+    assert [record["status"] for record in records] == ["error", "ok"]
 
 
 def test_main_run_dispatches_group(tmp_path: Path, monkeypatch) -> None:

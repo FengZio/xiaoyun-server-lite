@@ -27,6 +27,7 @@ data/.stable_memory.replay.yaml
 *.swo
 .vscode/
 .worktrees/
+ablation_experiments/configs/runtime.yaml
 
 # OS files
 .DS_Store

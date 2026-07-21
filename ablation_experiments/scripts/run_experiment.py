@@ -48,8 +48,11 @@ def run_group(group_id: str, runtime: dict[str, Any], matrix_path: Path, cases_p
     try:
         for case in load_cases(cases_path):
             case = {**case, "agent_id": runtime.get("agent_id")}
-            probe = run_ws_case(case, runtime["ws_url"], float(runtime.get("request_timeout_s", 45)))
-            result = asyncio.run(probe) if asyncio.iscoroutine(probe) else probe
+            try:
+                probe = run_ws_case(case, runtime["ws_url"], float(runtime.get("request_timeout_s", 45)))
+                result = asyncio.run(probe) if asyncio.iscoroutine(probe) else probe
+            except Exception as error:
+                result = {"status": "error", "error_type": type(error).__name__, "error_message": str(error)}
             append_jsonl(run_dir / "ws_records.jsonl", {"run_id": run_id, "group_id": group_id, "config_sha256": config_sha256, "case_id": case["case_id"], **result})
     finally:
         if manager_api is not None and active_baseline:
