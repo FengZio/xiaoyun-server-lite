@@ -60,15 +60,15 @@ def judge_pair(case: dict[str, Any], reply_a: str, reply_b: str, invoke: Any) ->
     return results
 
 
-def build_openai_client(base_url: str | None = None) -> OpenAI:
-    options: dict[str, Any] = {"api_key": os.environ["OPENAI_API_KEY"]}
+def build_openai_client(base_url: str | None = None, api_key: str | None = None) -> OpenAI:
+    options: dict[str, Any] = {"api_key": api_key or os.environ["OPENAI_API_KEY"]}
     if base_url:
         options["base_url"] = base_url.rstrip("/")
     return OpenAI(**options)
 
 
-def invoke_openai(prompt: str, base_url: str | None = None) -> dict[str, Any]:
-    client = build_openai_client(base_url)
+def invoke_openai(prompt: str, base_url: str | None = None, api_key: str | None = None) -> dict[str, Any]:
+    client = build_openai_client(base_url, api_key)
     response = client.chat.completions.create(
         model=os.environ.get("GPT_JUDGE_MODEL", "gpt-4o-mini"),
         temperature=0,

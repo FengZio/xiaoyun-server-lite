@@ -60,3 +60,18 @@ def test_openai_client_uses_configured_base_url(monkeypatch) -> None:
     build_openai_client("https://gateway.example/v1")
 
     assert captured["base_url"] == "https://gateway.example/v1"
+
+
+def test_openai_client_uses_explicit_runtime_key(monkeypatch) -> None:
+    captured = {}
+
+    class Client:
+        def __init__(self, **kwargs): captured.update(kwargs)
+
+    monkeypatch.setattr("gpt_judge.OpenAI", Client)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    from gpt_judge import build_openai_client
+    build_openai_client(api_key="runtime-test-key")
+
+    assert captured["api_key"] == "runtime-test-key"
