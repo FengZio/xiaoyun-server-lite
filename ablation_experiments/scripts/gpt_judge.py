@@ -67,10 +67,10 @@ def build_openai_client(base_url: str | None = None, api_key: str | None = None)
     return OpenAI(**options)
 
 
-def invoke_openai(prompt: str, base_url: str | None = None, api_key: str | None = None) -> dict[str, Any]:
+def invoke_openai(prompt: str, base_url: str | None = None, api_key: str | None = None, model: str | None = None) -> dict[str, Any]:
     client = build_openai_client(base_url, api_key)
     response = client.chat.completions.create(
-        model=os.environ.get("GPT_JUDGE_MODEL", "gpt-4o-mini"),
+        model=model or os.environ.get("GPT_JUDGE_MODEL", "gpt-4o-mini"),
         temperature=0,
         response_format={"type": "json_object"},
         messages=[{"role": "user", "content": prompt}],
