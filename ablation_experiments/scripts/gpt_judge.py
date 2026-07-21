@@ -61,7 +61,7 @@ def judge_pair(case: dict[str, Any], reply_a: str, reply_b: str, invoke: Any) ->
 
 
 def build_openai_client(base_url: str | None = None, api_key: str | None = None) -> OpenAI:
-    options: dict[str, Any] = {"api_key": api_key or os.environ["OPENAI_API_KEY"]}
+    options: dict[str, Any] = {"api_key": api_key or os.environ["OPENAI_API_KEY"], "timeout": 60}
     if base_url:
         options["base_url"] = base_url.rstrip("/")
     return OpenAI(**options)

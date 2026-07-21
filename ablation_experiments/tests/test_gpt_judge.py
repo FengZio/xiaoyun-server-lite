@@ -60,6 +60,7 @@ def test_openai_client_uses_configured_base_url(monkeypatch) -> None:
     build_openai_client("https://gateway.example/v1")
 
     assert captured["base_url"] == "https://gateway.example/v1"
+    assert captured["timeout"] == 60
 
 
 def test_openai_client_uses_explicit_runtime_key(monkeypatch) -> None:
