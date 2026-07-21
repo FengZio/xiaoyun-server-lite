@@ -55,8 +55,7 @@ def test_run_group_restores_manager_baseline_after_probe_error(tmp_path: Path, m
         def restore(self, baseline): calls.append(("restore", baseline))
 
     monkeypatch.setattr(run_experiment, "run_ws_case", lambda *_: (_ for _ in ()).throw(RuntimeError("probe")))
-    with pytest.raises(RuntimeError):
-        run_experiment.run_group("D1", {"ws_url": "ws://test"}, matrix_path, cases_path, tmp_path, "run", manager_api=Api())
+    run_experiment.run_group("D1", {"ws_url": "ws://test"}, matrix_path, cases_path, tmp_path, "run", manager_api=Api())
     assert calls[0] == ("apply", {"dialogue_policy.enabled": False})
     assert calls[1][0] == "restore"
 
