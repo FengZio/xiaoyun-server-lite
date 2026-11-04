@@ -1,0 +1,22 @@
+{
+  "dialogue_policy": {
+    "enabled": true,
+    "enable_stable_memory": true,
+    "enable_music_hypothesis": true,
+    "enable_soft_confirmation": false
+  },
+  "integration": {
+    "enable_persona": true,
+    "persona_cache_ttl": 300
+  },
+  "audio_emotion": {
+    "enabled": true,
+    "sync_wait": false
+  },
+  "sentence_pipeline": {
+    "enabled": true,
+    "max_tts_workers": 2,
+    "max_pending_sentences": 4,
+    "max_pending_audio_jobs": 3
+  }
+}

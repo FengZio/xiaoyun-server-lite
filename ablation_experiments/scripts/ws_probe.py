@@ -15,15 +15,23 @@ def extract_timeline(events: list[dict[str, Any]]) -> dict[str, int | None]:
         kind = event.get("kind")
         if kind in first and first[kind] is None:
             first[kind] = event.get("at_ms")
+    audio_times = [event["at_ms"] for event in events if event.get("kind") == "audio"]
+    audio_gaps = [later - earlier for earlier, later in zip(audio_times, audio_times[1:])]
     return {
         "t_first_visible_reply_ms": _elapsed(first["text"], sent_at),
         "t_first_audio_ms": _elapsed(first["audio"], sent_at),
         "t_reply_complete_ms": _elapsed(first["completed"], sent_at),
+        "audio_chunk_count": len(audio_times),
+        "audio_gap_max_ms": max(audio_gaps) if audio_gaps else None,
     }
 
 
 def _elapsed(timestamp: int | None, sent_at: int) -> int | None:
     return None if timestamp is None else int(timestamp - sent_at)
+
+
+def is_audio_message(message: dict[str, Any]) -> bool:
+    return bool(message.get("audio_url")) or message.get("type") in {"reply_audio", "reply_audio_chunk"}
 
 
 async def run_ws_case(case: dict[str, Any], endpoint: str, timeout_s: float) -> dict[str, Any]:
@@ -46,9 +54,13 @@ async def run_ws_case(case: dict[str, Any], endpoint: str, timeout_s: float) -> 
             message_type = message.get("type")
             if message_type in {"reply_start", "reply_text_chunk"} or (message_type == "reply" and message.get("state") == "start"):
                 events.append({"kind": "text", "at_ms": at_ms})
-            if message.get("audio_url") or message_type == "reply_audio_chunk":
+            audio_received = is_audio_message(message)
+            if audio_received:
                 events.append({"kind": "audio", "at_ms": at_ms})
-            is_complete = message_type == "reply_end" or (message_type == "reply" and message.get("state") in {"end", "complete", "error"})
+            text_complete = message_type == "reply_end" or (message_type == "reply" and message.get("state") in {"end", "complete", "error"})
+            is_complete = audio_received if case.get("enable_audio", False) else text_complete
+            if message.get("state") == "error":
+                is_complete = True
             if is_complete:
                 events.append({"kind": "completed", "at_ms": at_ms})
                 status = "error" if message.get("state") == "error" else "ok"

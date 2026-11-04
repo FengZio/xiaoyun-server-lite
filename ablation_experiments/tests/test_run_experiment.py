@@ -12,7 +12,7 @@ if str(SCRIPTS_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_DIR))
 
 import run_experiment
-from run_experiment import create_run_directory, preflight
+from run_experiment import create_run_directory, dataset_for_group, preflight
 
 
 def test_preflight_requires_websocket_and_service_b() -> None:
@@ -27,6 +27,13 @@ def test_run_directory_isolated(tmp_path: Path) -> None:
 
     assert path == tmp_path / "20260720T120000Z_D0"
     assert path.is_dir()
+
+
+def test_dataset_for_group_uses_voice_cases_for_v_series() -> None:
+    root = Path("ablation_experiments")
+
+    assert dataset_for_group(root, "V0") == root / "datasets" / "voice_cases.jsonl"
+    assert dataset_for_group(root, "D0") == root / "datasets" / "dialogue_cases.jsonl"
 
 
 def test_run_group_writes_snapshot_and_records(tmp_path: Path, monkeypatch) -> None:

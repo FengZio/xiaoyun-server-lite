@@ -32,7 +32,12 @@ def create_run_directory(raw_root: Path, group_id: str, run_id: str) -> Path:
     return path
 
 
-def run_group(group_id: str, runtime: dict[str, Any], matrix_path: Path, cases_path: Path, raw_root: Path, run_id: str, manager_api: Any = None) -> Path:
+def dataset_for_group(root: Path, group_id: str) -> Path:
+    name = "voice_cases.jsonl" if group_id.startswith("V") else "dialogue_cases.jsonl"
+    return root / "datasets" / name
+
+
+def run_group(group_id: str, runtime: dict[str, Any], matrix_path: Path, cases_path: Path, raw_root: Path, run_id: str, manager_api: Any = None, repeats: int = 1) -> Path:
     matrix = load_group_matrix(matrix_path)
     snapshot = build_group_snapshot(matrix, group_id)
     run_dir = create_run_directory(raw_root, group_id, run_id)
@@ -46,16 +51,17 @@ def run_group(group_id: str, runtime: dict[str, Any], matrix_path: Path, cases_p
         active_baseline = {code: baseline[code] for code in overrides}
         manager_api.apply_overrides(active_baseline, overrides)
     try:
-        for case in load_cases(cases_path):
-            case = {**case, "agent_id": runtime.get("agent_id")}
-            try:
-                probe = run_ws_case(case, runtime["ws_url"], float(runtime.get("request_timeout_s", 45)))
-                result = asyncio.run(probe) if asyncio.iscoroutine(probe) else probe
-                if isinstance(result, BaseException):
-                    raise result
-            except Exception as error:
-                result = {"status": "error", "error_type": type(error).__name__, "error_message": str(error)}
-            append_jsonl(run_dir / "ws_records.jsonl", {"run_id": run_id, "group_id": group_id, "config_sha256": config_sha256, "case_id": case["case_id"], **result})
+        for trial_index in range(1, repeats + 1):
+            for case in load_cases(cases_path):
+                case = {**case, "agent_id": runtime.get("agent_id")}
+                try:
+                    probe = run_ws_case(case, runtime["ws_url"], float(runtime.get("request_timeout_s", 45)))
+                    result = asyncio.run(probe) if asyncio.iscoroutine(probe) else probe
+                    if isinstance(result, BaseException):
+                        raise result
+                except Exception as error:
+                    result = {"status": "error", "error_type": type(error).__name__, "error_message": str(error)}
+                append_jsonl(run_dir / "ws_records.jsonl", {"run_id": run_id, "group_id": group_id, "config_sha256": config_sha256, "case_id": case["case_id"], "trial_index": trial_index, **result})
     finally:
         if manager_api is not None and active_baseline:
             manager_api.restore(active_baseline)
@@ -67,6 +73,7 @@ def main() -> int:
     parser.add_argument("command", choices=["preflight", "run"])
     parser.add_argument("--runtime", required=True, type=Path)
     parser.add_argument("--group")
+    parser.add_argument("--repeats", type=int, default=1)
     args = parser.parse_args()
     runtime = yaml.safe_load(args.runtime.read_text(encoding="utf-8")) or {}
     errors = preflight(runtime)
@@ -84,10 +91,11 @@ def main() -> int:
             args.group,
             runtime,
             root / "configs" / "groups.yaml",
-            root / "datasets" / "dialogue_cases.jsonl",
+            dataset_for_group(root, args.group),
             root / "raw",
             datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ"),
             manager_api=manager_api,
+            repeats=args.repeats,
         )
         print(run_dir)
         return 0
