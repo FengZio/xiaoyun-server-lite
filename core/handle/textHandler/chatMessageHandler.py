@@ -5,6 +5,7 @@ import threading
 from typing import Dict, Any
 from core.handle.textMessageHandler import TextMessageHandler
 from core.handle.textMessageType import TextMessageType
+from core.utils.client_context import normalize_entry_context
 
 TAG = __name__
 
@@ -32,6 +33,10 @@ class ChatTextMessageHandler(TextMessageHandler):
         content = msg_json.get("content", "")
         enable_audio = msg_json.get("enable_audio", True)  # 默认启用音频
         agent_id = msg_json.get("agent_id", None)  # 获取智能体ID
+        entry_context = normalize_entry_context(
+            msg_json.get("entry_context", {}),
+            existing=getattr(conn, "entry_context", {}),
+        )
         self._adopt_client_session_id(conn, msg_json)
         
         if not content:
@@ -76,6 +81,7 @@ class ChatTextMessageHandler(TextMessageHandler):
         conn.enable_audio_response = enable_audio
         conn.uniapp_audio_files = []  # 存储生成的音频文件路径
         conn.last_user_message = content
+        conn.entry_context = entry_context
         conn.logger.bind(tag=TAG).info("标记为 UniApp 客户端")
 
         # manager-api 上报要求 macAddress 非空；UniApp 常见无 device-id 头，做兜底映射
@@ -178,9 +184,19 @@ class ChatTextMessageHandler(TextMessageHandler):
             # 检查是否已经是当前智能体
             current_agent_id = getattr(conn, 'current_agent_id', None)
             had_llm_before_switch = conn.llm is not None
-            if current_agent_id == agent_id:
+            current_selected_module = conn.config.get("selected_module", {}) or {}
+            missing_runtime_modules = [
+                module_name
+                for module_name in ("Intent", "VLLM")
+                if not current_selected_module.get(module_name) or not conn.config.get(module_name)
+            ]
+            if current_agent_id == agent_id and not missing_runtime_modules:
                 conn.logger.bind(tag=TAG).debug(f"已经在使用智能体 {agent_id}，无需切换")
                 return True
+            if current_agent_id == agent_id and missing_runtime_modules:
+                conn.logger.bind(tag=TAG).warning(
+                    f"检测到当前智能体运行态配置缺失，执行强制刷新: agent_id={agent_id}, missing={missing_runtime_modules}"
+                )
             
             conn.logger.bind(tag=TAG).info(f"开始切换智能体: {current_agent_id} -> {agent_id}")
             
@@ -234,6 +250,28 @@ class ChatTextMessageHandler(TextMessageHandler):
                 conn.logger.bind(tag=TAG).error(f"智能体 {agent_id} 切换后 LLM 仍未初始化")
                 await self._send_error_reply(conn, "智能体LLM初始化失败，请检查配置")
                 return False
+
+            # 更新 VLLM 配置（视觉模型）
+            if agent_config.get("VLLM"):
+                conn.config["VLLM"] = agent_config["VLLM"]
+                if agent_config.get("selected_module", {}).get("VLLM"):
+                    conn.config["selected_module"]["VLLM"] = agent_config["selected_module"]["VLLM"]
+                conn.logger.bind(tag=TAG).info(
+                    f"已同步智能体 {agent_id} 的 VLLM: "
+                    f"selected={conn.config.get('selected_module', {}).get('VLLM')}, "
+                    f"keys={list((conn.config.get('VLLM') or {}).keys())}"
+                )
+
+            # 更新 Intent 配置
+            if agent_config.get("Intent"):
+                conn.config["Intent"] = agent_config["Intent"]
+                if agent_config.get("selected_module", {}).get("Intent"):
+                    conn.config["selected_module"]["Intent"] = agent_config["selected_module"]["Intent"]
+                conn.logger.bind(tag=TAG).info(
+                    f"已同步智能体 {agent_id} 的 Intent: "
+                    f"selected={conn.config.get('selected_module', {}).get('Intent')}, "
+                    f"keys={list((conn.config.get('Intent') or {}).keys())}"
+                )
 
             # 更新 TTS 配置，并保留本地敏感字段（api_key/api_url 等）
             if agent_config.get("TTS"):

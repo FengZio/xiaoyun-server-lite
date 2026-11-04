@@ -1,7 +1,13 @@
 import os
 import yaml
 from collections.abc import Mapping
-from config.manage_api_client import init_service, get_server_config, get_agent_models
+from config.manage_api_client import (
+    init_service,
+    get_server_config,
+    get_agent_models,
+    get_agent_config,
+    get_device_agent_id,
+)
 
 
 def get_project_dir():
@@ -63,6 +69,11 @@ def get_config_from_api(config):
     config_data["manager-api"] = {
         "url": config["manager-api"].get("url", ""),
         "secret": config["manager-api"].get("secret", ""),
+        "timeout": config["manager-api"].get("timeout", 30),
+        "max_retries": config["manager-api"].get("max_retries", 6),
+        "retry_delay": config["manager-api"].get("retry_delay", 10),
+        # 保留本地 manager-api 数据库配置，供 UniApp 自动创建设备时直连数据库使用。
+        "database": config["manager-api"].get("database", {}) or {},
     }
     
     # server的配置以本地为准
@@ -137,6 +148,16 @@ def _merge_sensitive_fields(api_config, local_config, module_type):
 
 def get_private_config_from_api(config, device_id, client_id):
     """从Java API获取私有配置"""
+    if device_id and str(device_id).startswith("uniapp_"):
+        try:
+            agent_id = get_device_agent_id(config, device_id)
+            if agent_id:
+                agent_config = get_agent_config(config, str(agent_id))
+                if agent_config:
+                    return agent_config
+        except Exception as e:
+            print(f"UniApp fallback agent config fetch failed for {device_id}: {e}")
+
     return get_agent_models(device_id, client_id, config["selected_module"])
 
 

@@ -25,10 +25,7 @@ class ASRProvider(ASRProviderBase):
         file_path = None
         try:
             start_time = time.time()
-            if audio_format == "pcm":
-                pcm_data = opus_data
-            else:
-                pcm_data = self.decode_opus(opus_data)
+            pcm_data = self.normalize_audio_chunks(opus_data, audio_format)
             file_path = self.save_audio_to_file(pcm_data, session_id)
 
             logger.bind(tag=TAG).debug(

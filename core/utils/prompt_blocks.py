@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import re
 from typing import Dict, Tuple
 
@@ -19,10 +19,12 @@ class PromptBlock:
 
 @dataclass
 class PromptBlocks:
-    policy_block: PromptBlock
-    persona_block: PromptBlock
-    state_block: PromptBlock
-    memory_block: PromptBlock
+    policy_block: PromptBlock = field(default_factory=PromptBlock)
+    personality_block: PromptBlock = field(default_factory=PromptBlock)
+    persona_block: PromptBlock = field(default_factory=PromptBlock)
+    vision_block: PromptBlock = field(default_factory=PromptBlock)
+    state_block: PromptBlock = field(default_factory=PromptBlock)
+    memory_block: PromptBlock = field(default_factory=PromptBlock)
 
 
 class PromptAssembler:
@@ -62,8 +64,14 @@ class PromptAssembler:
         prompt, stats["policy"] = PromptAssembler._inject_block(
             prompt, "policy", blocks.policy_block.render()
         )
+        prompt, stats["personality"] = PromptAssembler._inject_block(
+            prompt, "personality", blocks.personality_block.render()
+        )
         prompt, stats["persona"] = PromptAssembler._inject_block(
             prompt, "persona", blocks.persona_block.render()
+        )
+        prompt, stats["vision"] = PromptAssembler._inject_block(
+            prompt, "vision", blocks.vision_block.render()
         )
         prompt, stats["state"] = PromptAssembler._inject_block(
             prompt, "state", blocks.state_block.render()

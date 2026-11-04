@@ -180,6 +180,32 @@ def get_agent_config(config: Dict, agent_id: str) -> Optional[Dict]:
             return None
 
 
+def get_device_agent_id(config: Dict, device_id: str) -> Optional[str]:
+    """根据设备ID查询默认智能体ID。"""
+    if not device_id:
+        return None
+
+    if pymysql is None:
+        raise Exception("pymysql is required: pip install pymysql")
+
+    db_config = _get_database_config(config)
+    connection = pymysql.connect(**db_config)
+    try:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                "SELECT agent_id FROM ai_device WHERE mac_address = %s ORDER BY id DESC LIMIT 1",
+                (device_id,),
+            )
+            result = cursor.fetchone()
+            if isinstance(result, dict):
+                return result.get("agent_id")
+            if isinstance(result, (list, tuple)) and result:
+                return result[0]
+            return None
+    finally:
+        connection.close()
+
+
 def save_mem_local_short(mac_address: str, short_momery: str) -> Optional[Dict]:
     try:
         return ManageApiClient._instance._execute_request(
@@ -331,28 +357,8 @@ def create_uniapp_device_if_not_exists(config, device_id, user_id):
                 if include_user_id:
                     insert_sql = """
                         INSERT INTO ai_device (
-                            id, mac_address, alias, device_type,
+                            id, mac_address, alias,
                             user_id, agent_id, create_date, update_date
-                        ) VALUES (
-                            %s, %s, %s, %s, %s, %s, NOW(), NOW()
-                        )
-                    """
-                    cursor.execute(
-                        insert_sql,
-                        (
-                            device_uuid,
-                            device_id,
-                            device_name,
-                            "uniapp",
-                            user_id_value,
-                            agent_id,
-                        ),
-                    )
-                else:
-                    insert_sql = """
-                        INSERT INTO ai_device (
-                            id, mac_address, alias, device_type,
-                            agent_id, create_date, update_date
                         ) VALUES (
                             %s, %s, %s, %s, %s, NOW(), NOW()
                         )
@@ -363,7 +369,25 @@ def create_uniapp_device_if_not_exists(config, device_id, user_id):
                             device_uuid,
                             device_id,
                             device_name,
-                            "uniapp",
+                            user_id_value,
+                            agent_id,
+                        ),
+                    )
+                else:
+                    insert_sql = """
+                        INSERT INTO ai_device (
+                            id, mac_address, alias,
+                            agent_id, create_date, update_date
+                        ) VALUES (
+                            %s, %s, %s, %s, NOW(), NOW()
+                        )
+                    """
+                    cursor.execute(
+                        insert_sql,
+                        (
+                            device_uuid,
+                            device_id,
+                            device_name,
                             agent_id,
                         ),
                     )
@@ -410,6 +434,7 @@ def _get_default_agent_id(config):
 
 def _get_database_config(config):
     manager_api_config = config.get("manager-api", {})
+    database_config = manager_api_config.get("database", {}) or {}
     manager_api_url = manager_api_config.get("url", "http://localhost:8002")
 
     if "://" in manager_api_url:
@@ -421,11 +446,11 @@ def _get_database_config(config):
         host = "xiaozhi-esp32-server-db"
 
     db_config = {
-        "host": host,
-        "port": 3306,
-        "user": "root",
-        "password": "123456",
-        "database": "xiaozhi_esp32_server",
+        "host": database_config.get("host") or host,
+        "port": int(database_config.get("port", 3306)),
+        "user": database_config.get("user", "root"),
+        "password": database_config.get("password", "123456"),
+        "database": database_config.get("database", "xiaozhi_esp32_server"),
         "charset": "utf8mb4",
     }
 

@@ -11,6 +11,7 @@ import threading
 import opuslib_next
 import concurrent.futures
 from abc import ABC, abstractmethod
+from pydub import AudioSegment
 from config.logger import setup_logging
 from typing import Optional, Tuple, List
 from core.handle.receiveAudioHandle import startToChat
@@ -86,10 +87,7 @@ class ASRProviderBase(ABC):
             logger.bind(tag=TAG).info(f"[ASR调试] 音频帧数: {len(asr_audio_task)}, 总字节: {total_bytes}, 格式: {conn.audio_format}")
             
             # 准备音频数据
-            if conn.audio_format == "pcm":
-                pcm_data = asr_audio_task
-            else:
-                pcm_data = self.decode_opus(asr_audio_task)
+            pcm_data = self.normalize_audio_chunks(asr_audio_task, conn.audio_format)
             
             combined_pcm_data = b"".join(pcm_data)
             logger.bind(tag=TAG).info(f"[ASR调试] 合并后PCM大小: {len(combined_pcm_data)} bytes, 预估时长: {len(combined_pcm_data) / 32000:.2f}秒")
@@ -247,6 +245,46 @@ class ASRProviderBase(ABC):
         """将语音数据转换为文本"""
         pass
 
+    @classmethod
+    def normalize_audio_chunks(cls, audio_chunks: List[bytes], audio_format: str) -> List[bytes]:
+        normalized_format = (audio_format or "opus").lower()
+        inferred_format = cls.detect_audio_format(audio_chunks)
+        if inferred_format and inferred_format != normalized_format:
+            logger.bind(tag=TAG).warning(
+                f"检测到音频头格式与握手不一致: declared={normalized_format}, inferred={inferred_format}"
+            )
+            normalized_format = inferred_format
+        if normalized_format == "pcm":
+            return audio_chunks
+        if normalized_format in {"mp3", "wav", "aac", "m4a", "adts"}:
+            return cls.decode_compressed_audio(audio_chunks, normalized_format)
+        return cls.decode_opus(audio_chunks)
+
+    @staticmethod
+    def detect_audio_format(audio_chunks: List[bytes]) -> Optional[str]:
+        if not audio_chunks:
+            return None
+
+        header = b"".join(audio_chunks[:2])[:16]
+        if len(header) < 4:
+            return None
+
+        if header.startswith(b"RIFF") and header[8:12] == b"WAVE":
+            return "wav"
+        if header.startswith(b"ID3"):
+            return "mp3"
+
+        first = header[0]
+        second = header[1]
+        if first == 0xFF:
+            # ADTS AAC 帧头通常为 0xFFF1 / 0xFFF9
+            if (second & 0xF6) == 0xF0:
+                return "adts"
+            if (second & 0xE0) == 0xE0:
+                return "mp3"
+
+        return None
+
     @staticmethod
     def decode_opus(opus_data: List[bytes]) -> List[bytes]:
         """将Opus音频数据解码为PCM数据"""
@@ -273,4 +311,31 @@ class ASRProviderBase(ABC):
             
         except Exception as e:
             logger.bind(tag=TAG).error(f"音频解码过程发生错误: {e}")
+            return []
+
+    @staticmethod
+    def decode_compressed_audio(audio_data: List[bytes], audio_format: str) -> List[bytes]:
+        """将压缩音频解码为16kHz单声道16bit PCM"""
+        try:
+            combined_audio = b"".join(audio_data)
+            if not combined_audio:
+                return []
+
+            source_format = (audio_format or "").lower()
+            if source_format == "aac":
+                source_format = "adts"
+
+            segment = AudioSegment.from_file(
+                io.BytesIO(combined_audio),
+                format=source_format,
+            )
+            segment = segment.set_frame_rate(16000).set_channels(1).set_sample_width(2)
+            pcm_bytes = segment.raw_data
+            if not pcm_bytes:
+                return []
+            return [pcm_bytes]
+        except Exception as e:
+            logger.bind(tag=TAG).error(
+                f"压缩音频解码失败, 格式: {audio_format}, 错误: {e}"
+            )
             return []

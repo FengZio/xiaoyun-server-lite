@@ -69,10 +69,30 @@ def _infer_mood_label(stats: Dict[str, Any]) -> str:
     return "平稳"
 
 
+def _infer_recent_music_signal_label(valence: Optional[float], arousal: Optional[float]) -> str:
+    if valence is None and arousal is None:
+        return "暂无明显信号"
+    if arousal is not None and arousal <= -0.25:
+        if valence is not None and valence <= -0.1:
+            return "偏低唤醒偏负向"
+        return "偏低唤醒"
+    if arousal is not None and arousal >= 0.35:
+        if valence is not None and valence >= 0.1:
+            return "偏高唤醒偏正向"
+        if valence is not None and valence <= -0.1:
+            return "偏高唤醒偏负向"
+        return "偏高唤醒"
+    if valence is not None and valence >= 0.2:
+        return "偏正向"
+    if valence is not None and valence <= -0.2:
+        return "偏负向"
+    return "较平稳"
+
+
 def _extract_long_term_lines(summary_text: str) -> list[str]:
     if not summary_text:
         return []
-    ignored_keywords = ("当前心情", "情绪价", "唤醒度", "最近心情", "短期心情")
+    ignored_keywords = ("当前心情", "情绪价", "唤醒度", "最近心情", "短期心情", "最近音乐信号", "价态")
     lines: list[str] = []
     for raw in summary_text.splitlines():
         line = raw.strip()
@@ -143,7 +163,7 @@ class UnifiedServiceClient:
             return None
 
     def build_layered_persona(self, user_id: str) -> Dict[str, Any]:
-        """Build persona with short-term mood + long-term profile."""
+        """Build persona with recent music signal + long-term profile."""
         if not user_id:
             return {}
 
@@ -154,12 +174,32 @@ class UnifiedServiceClient:
         valence = _pick_float(stats, ["current_valence", "valence", "emotion_valence"])
         arousal = _pick_float(stats, ["current_arousal", "arousal", "emotion_arousal"])
         mood_label = _infer_mood_label(stats)
+        recent_signal = persona_data.get("recent_music_signal") or {}
+        signal_label = str(
+            recent_signal.get("label")
+            or _infer_recent_music_signal_label(valence, arousal)
+        ).strip()
+        sample_count = int(
+            recent_signal.get("sample_count")
+            or recent_signal.get("total_plays")
+            or stats.get("recent_play_count")
+            or 0
+        )
+        window_days = int(recent_signal.get("window_days") or 7)
+        signal_confidence = _pick_float(
+            recent_signal, ["confidence"]
+        )
+        if signal_confidence is None:
+            signal_confidence = _pick_float(stats, ["confidence"])
 
         short_term = {
-            "label": mood_label,
+            "label": signal_label,
             "valence": valence,
             "arousal": arousal,
-            "source": "statistics",
+            "source": "recent_music_signal",
+            "sample_count": sample_count,
+            "window_days": window_days,
+            "confidence": signal_confidence,
         }
 
         top_song = _pick_str(
@@ -181,15 +221,17 @@ class UnifiedServiceClient:
             "source": "persona",
         }
 
-        short_line = f"短期心情: {mood_label}"
+        short_line = f"最近音乐信号: {signal_label}"
         valence_str = _fmt_float(valence)
         arousal_str = _fmt_float(arousal)
         if valence_str or arousal_str:
             metrics = []
             if valence_str:
-                metrics.append(f"情绪价 {valence_str}")
+                metrics.append(f"价态 {valence_str}")
             if arousal_str:
                 metrics.append(f"唤醒度 {arousal_str}")
+            if sample_count:
+                metrics.append(f"样本 {sample_count}")
             short_line = f"{short_line} ({', '.join(metrics)})"
 
         rendered_lines = ["用户画像（短期+长期）:", f"- {short_line}"]
@@ -202,8 +244,13 @@ class UnifiedServiceClient:
         summary_text = "\n".join(rendered_lines).strip()
         return {
             "short_term": short_term,
+            "recent_music_signal": short_term,
             "long_term": long_term,
             "summary_text": summary_text,
+            "compatibility": {
+                "short_term_semantics": "recent_music_signal",
+                "mood_label": mood_label,
+            },
         }
 
     def build_music_signals(self, user_id: str) -> Dict:
@@ -240,6 +287,7 @@ class UnifiedServiceClient:
 
         return {
             "source": "unified_service_stats",
+            "signal_type": str(stats.get("signal_type") or "weak_music_signal"),
             "has_recent_music_activity": recent_play_count > 0,
             "recent_play_count": recent_play_count,
             "low_arousal_ratio": low_arousal_ratio,

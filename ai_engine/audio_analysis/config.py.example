@@ -1,0 +1,25 @@
+# Server A 配置文件模板
+# 复制为 config.py 后按实际环境填写：
+#     cp config.py.example config.py
+# 注意：config.py 含真实凭据，已被 .gitignore 排除，不要提交。
+
+# Redis 配置（连接到 Server B）
+REDIS_CONFIG = {
+    'host': 'tag.zrj666.cn',
+    'port': 6379,
+    'password': 'your_redis_password',   # 请修改
+    'db': 0
+}
+
+# Server B API 配置
+SERVER_B_URL = 'https://tag.zrj666.cn'
+INTERNAL_TOKEN = 'your_internal_token'   # 请修改
+
+# 分析配置
+MAX_WORKERS = 2
+DOWNLOAD_TIMEOUT = 30
+ANALYSIS_TIMEOUT = 120
+TEMP_DIR = '/tmp/audio_analysis'
+
+# 内存监控
+MEMORY_THRESHOLD = 85  # 内存使用超过85%时暂停

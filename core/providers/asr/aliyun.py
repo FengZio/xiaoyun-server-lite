@@ -223,10 +223,7 @@ class ASRProvider(ASRProviderBase):
         file_path = None
         try:
             # 解码Opus为PCM
-            if audio_format == "pcm":
-                pcm_data = opus_data
-            else:
-                pcm_data = self.decode_opus(opus_data)
+            pcm_data = self.normalize_audio_chunks(opus_data, audio_format)
             combined_pcm_data = b"".join(pcm_data)
 
             # 判断是否保存为WAV文件

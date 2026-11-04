@@ -1,7 +1,7 @@
 import base64
 import json
 import os
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterator, List, Optional
 
 import requests
 
@@ -14,9 +14,9 @@ class TTSProvider(TTSProviderBase):
         self.api_key = config.get("api_key", "")
         self.api_url = config.get("api_url", "https://api.xiaomimimo.com/v1")
         self.model = config.get("model", "mimo-v2-tts")
-        self.voice = config.get("voice", "mimo_default")
+        self.voice = config.get("voice", "mimo_default") or "mimo_default"
         self.audio_file_type = config.get("format", "mp3")
-        self.timeout = int(config.get("timeout", 60))
+        self.timeout = int(config.get("timeout", 8))
         self.extra_body = config.get("extra_body", {}) or {}
 
     async def text_to_speak(self, text, output_file):
@@ -28,6 +28,7 @@ class TTSProvider(TTSProviderBase):
         payload = self._build_payload(text)
         headers = {
             "Authorization": f"Bearer {self.api_key}",
+            "api-key": self.api_key,
             "Content-Type": "application/json",
         }
 
@@ -49,7 +50,32 @@ class TTSProvider(TTSProviderBase):
             return None
         return audio_bytes
 
-    def _build_payload(self, assistant_text: str) -> Dict[str, Any]:
+    def stream_text_to_speak(self, text: str) -> Iterator[str]:
+        if not self.api_url:
+            raise Exception("xiaomimimo TTS api_url 未配置")
+        if not self.api_key:
+            raise Exception("xiaomimimo TTS api_key 未配置")
+
+        payload = self._build_payload(text, audio_format="pcm16")
+        payload["stream"] = True
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "api-key": self.api_key,
+            "Content-Type": "application/json",
+        }
+
+        with requests.post(
+            self._build_request_url(),
+            json=payload,
+            headers=headers,
+            timeout=self.timeout,
+            stream=True,
+        ) as response:
+            response.raise_for_status()
+            for audio_base64 in self._iter_stream_audio(response):
+                yield audio_base64
+
+    def _build_payload(self, assistant_text: str, audio_format: Optional[str] = None) -> Dict[str, Any]:
         user_text = ""
         if getattr(self, "conn", None) is not None:
             user_text = getattr(self.conn, "last_user_message", "") or ""
@@ -63,7 +89,7 @@ class TTSProvider(TTSProviderBase):
             "model": self.model,
             "messages": messages,
             "audio": {
-                "format": self.audio_file_type,
+                "format": audio_format or self.audio_file_type,
                 "voice": self.voice,
             },
         }
@@ -112,3 +138,29 @@ class TTSProvider(TTSProviderBase):
             except Exception:
                 return None
         return None
+
+    def _iter_stream_audio(self, response: requests.Response) -> Iterator[str]:
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            line = line.strip()
+            if line.startswith("data:"):
+                line = line[5:].strip()
+            if not line or line == "[DONE]":
+                continue
+            try:
+                data = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            choices = data.get("choices")
+            if not isinstance(choices, list) or not choices:
+                continue
+            delta = choices[0].get("delta") if isinstance(choices[0], dict) else None
+            if not isinstance(delta, dict):
+                continue
+            audio = delta.get("audio")
+            if not isinstance(audio, dict):
+                continue
+            audio_data = audio.get("data")
+            if isinstance(audio_data, str) and audio_data:
+                yield audio_data

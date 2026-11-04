@@ -10,4 +10,5 @@ class TextMessageType(Enum):
     MCP = "mcp"
     SERVER = "server"
     CHAT = "chat"      # UniApp 文本聊天
+    IMAGE_CHAT = "image_chat"  # UniApp 图片聊天
     REPLY = "reply"    # 服务器回复

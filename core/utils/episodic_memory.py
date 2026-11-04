@@ -78,7 +78,13 @@ class EpisodicMemoryStore:
             self._save_all()
         return changed
 
-    def update_from_turn(self, user_id: str, user_text: str, assistant_text: str) -> bool:
+    def update_from_turn(
+        self,
+        user_id: str,
+        user_text: str,
+        assistant_text: str,
+        context: Dict[str, Any] | None = None,
+    ) -> bool:
         """Persist one event card and optionally track unfinished topics."""
         if not user_id or not user_text:
             return False
@@ -106,6 +112,14 @@ class EpisodicMemoryStore:
             "emotion_hint": emotion_hint,
             "keywords": _tokenize(user_text)[:8],
         }
+        if isinstance(context, dict):
+            compact_context = {
+                key: value
+                for key, value in context.items()
+                if value not in ("", None, False)
+            }
+            if compact_context:
+                event["context"] = compact_context
         profile["events"].append(event)
         max_events = int(profile.get("max_events", 10))
         if len(profile["events"]) > max_events:

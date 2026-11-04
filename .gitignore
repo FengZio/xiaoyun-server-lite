@@ -1,5 +1,6 @@
 # Local configuration with secrets
 config.yaml
+ai_engine/audio_analysis/config.py
 .env
 .env.*
 
@@ -17,8 +18,8 @@ logs/
 tmp/
 *.log
 data/.config.yaml
-data/.episodic_memory.replay.yaml
-data/.stable_memory.replay.yaml
+data/.episodic_memory*.yaml
+data/.stable_memory*.yaml
 
 # Local backups and editor files
 *.backup

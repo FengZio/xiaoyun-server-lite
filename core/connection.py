@@ -1,15 +1,18 @@
 import os
+import re
 import sys
 import copy
 import json
 import uuid
 import time
 import queue
+import shutil
 import asyncio
 import threading
 import traceback
 import subprocess
 import websockets
+from time import perf_counter
 
 from core.utils.util import (
     extract_json_from_string,
@@ -41,8 +44,30 @@ from config.manage_api_client import DeviceNotFoundException, DeviceBindExceptio
 from core.utils.prompt_manager import PromptManager
 from core.utils.voiceprint_provider import VoiceprintProvider
 from core.utils import textUtils
-from core.utils.speech_planner import build_speech_plan
+from core.utils.speech_planner import (
+    DEFAULT_STYLE,
+    MIMO_TTS_PROMPT_RULES,
+    build_speech_plan,
+    build_mimo_prosody_system_prompt,
+    build_mimo_prosody_user_prompt,
+    extract_mimo_style,
+    extract_mimo_tts_text,
+    is_invalid_mimo_rewrite,
+)
 from integration.unified_service import UnifiedServiceClient
+from core.utils.client_context import (
+    build_episodic_turn_context,
+    build_memory_scope_key,
+    build_reply_meta,
+    derive_ui_state_hint,
+)
+from core.utils.sentence_pipeline import (
+    ReplyTurn,
+    SentenceUnit,
+    pcm16_base64_chunks_duration_ms,
+    pcm16_base64_chunks_to_wav_bytes,
+    split_sentence_buffer,
+)
 
 TAG = __name__
 
@@ -54,6 +79,9 @@ class TTSException(RuntimeError):
 
 
 class ConnectionHandler:
+    _uniapp_cleanup_started = False
+    _uniapp_cleanup_lock = threading.Lock()
+
     def __init__(
         self,
         config: Dict[str, Any],
@@ -84,6 +112,9 @@ class ConnectionHandler:
         self.max_output_size = 0
         self.chat_history_conf = 0
         self.audio_format = "opus"
+        self.is_uniapp_client = False
+        self.enable_audio_response = False
+        self.uniapp_audio_files = []
 
         # 客户端状态相关
         self.client_abort = False
@@ -133,6 +164,9 @@ class ConnectionHandler:
         self.llm_finish_task = True
         self.dialogue = Dialogue()
         self.dialogue_policy_state = {}
+        self.last_policy = {}
+        self.pending_visual_context = None
+        self.entry_context = {}
 
         # tts相关变量
         self.sentence_id = None
@@ -164,6 +198,132 @@ class ConnectionHandler:
         # 初始化提示词管理器
         self.prompt_manager = PromptManager(config, self.logger)
         self.current_agent_id = None
+        self.current_reply_turn: ReplyTurn | None = None
+        self.reply_turn_lock = threading.Lock()
+        self._pending_sentence_audio_files = set()
+        self._active_reply_message_ids = set()
+        self._sentence_pipeline_config = self._load_sentence_pipeline_config()
+        self._rewrite_slots = threading.BoundedSemaphore(
+            value=max(1, self._sentence_pipeline_config["max_rewrite_workers"])
+        )
+        self._tts_slots = threading.BoundedSemaphore(
+            value=max(1, self._sentence_pipeline_config["max_tts_workers"])
+        )
+        self._ensure_uniapp_audio_cleanup_worker()
+
+    def _load_sentence_pipeline_config(self) -> Dict[str, Any]:
+        pipeline_conf = self.config.get("sentence_pipeline", {}) or {}
+        return {
+            "max_pending_sentences": int(
+                pipeline_conf.get("max_pending_sentences", 4)
+            ),
+            "max_rewrite_workers": int(pipeline_conf.get("max_rewrite_workers", 1)),
+            "max_tts_workers": int(pipeline_conf.get("max_tts_workers", 2)),
+            "max_pending_audio_jobs": int(
+                pipeline_conf.get("max_pending_audio_jobs", 3)
+            ),
+            "rewrite_timeout": float(pipeline_conf.get("rewrite_timeout", 2.5)),
+            "max_rewrite_sentences": int(
+                pipeline_conf.get("max_rewrite_sentences", 0)
+            ),
+            "rewrite_min_chars": int(pipeline_conf.get("rewrite_min_chars", 12)),
+            "min_sentence_chars": int(
+                pipeline_conf.get("min_sentence_chars", 8)
+            ),
+            "sentence_soft_limit": int(
+                pipeline_conf.get("sentence_soft_limit", 16)
+            ),
+            "sentence_hard_limit": int(
+                pipeline_conf.get("sentence_hard_limit", 28)
+            ),
+            "immersive_sentence_soft_limit": int(
+                pipeline_conf.get("immersive_sentence_soft_limit", 10)
+            ),
+            "immersive_sentence_hard_limit": int(
+                pipeline_conf.get("immersive_sentence_hard_limit", 18)
+            ),
+            "cleanup_enabled": bool(
+                self.config.get("uniapp_audio_cleanup_enabled", True)
+            ),
+            "cleanup_interval_seconds": int(
+                self.config.get("uniapp_audio_cleanup_interval_seconds", 300)
+            ),
+            "retention_seconds": int(
+                self.config.get("uniapp_audio_retention_seconds", 1800)
+            ),
+        }
+
+    def _ensure_uniapp_audio_cleanup_worker(self) -> None:
+        if not self._sentence_pipeline_config.get("cleanup_enabled", True):
+            return
+        with ConnectionHandler._uniapp_cleanup_lock:
+            if ConnectionHandler._uniapp_cleanup_started:
+                return
+            worker = threading.Thread(
+                target=self._uniapp_audio_cleanup_worker,
+                daemon=True,
+            )
+            worker.start()
+            ConnectionHandler._uniapp_cleanup_started = True
+
+    def _uniapp_audio_cleanup_worker(self) -> None:
+        cleanup_interval = max(
+            60, int(self._sentence_pipeline_config.get("cleanup_interval_seconds", 300))
+        )
+        while True:
+            try:
+                self._cleanup_expired_uniapp_audio_files()
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"uniapp audio cleanup worker failed: {e}"
+                )
+            time.sleep(cleanup_interval)
+
+    def _cleanup_expired_uniapp_audio_files(self) -> None:
+        audio_root = self.config.get("uniapp_audio_dir", "data/uniapp_audio")
+        retention = max(
+            60, int(self._sentence_pipeline_config.get("retention_seconds", 1800))
+        )
+        if not os.path.isdir(audio_root):
+            return
+
+        now = time.time()
+        for session_dir in os.listdir(audio_root):
+            session_path = os.path.join(audio_root, session_dir)
+            if not os.path.isdir(session_path):
+                continue
+            for message_dir in os.listdir(session_path):
+                message_path = os.path.join(session_path, message_dir)
+                if not os.path.isdir(message_path):
+                    continue
+                try:
+                    last_mtime = os.path.getmtime(message_path)
+                except OSError:
+                    continue
+                if now - last_mtime > retention:
+                    shutil.rmtree(message_path, ignore_errors=True)
+            if not os.path.exists(session_path):
+                continue
+            try:
+                if not os.listdir(session_path):
+                    os.rmdir(session_path)
+            except OSError:
+                pass
+
+    def _is_immersive_mode(self) -> bool:
+        entry_context = getattr(self, "entry_context", {}) or {}
+        return bool(entry_context.get("immersive_mode"))
+
+    def _get_sentence_limits(self) -> tuple[int, int]:
+        if self._is_immersive_mode():
+            return (
+                self._sentence_pipeline_config["immersive_sentence_soft_limit"],
+                self._sentence_pipeline_config["immersive_sentence_hard_limit"],
+            )
+        return (
+            self._sentence_pipeline_config["sentence_soft_limit"],
+            self._sentence_pipeline_config["sentence_hard_limit"],
+        )
 
     async def handle_connection(self, ws):
         try:
@@ -182,6 +342,10 @@ class ConnectionHandler:
 
             self.device_id = self.headers.get("device-id", None)
             self.current_agent_id = self.headers.get("agent-id", None)
+            if self.device_id and str(self.device_id).startswith("uniapp_"):
+                self.is_uniapp_client = True
+                self.enable_audio_response = True
+                self.uniapp_audio_files = []
 
             # 认证通过,继续处理
             self.websocket = ws
@@ -512,11 +676,12 @@ class ConnectionHandler:
         if not self.read_config_from_api:
             return
         """从接口获取差异化的配置进行二次实例化，非全量重新实例化"""
+        device_id = self.headers.get("device-id")
+        is_uniapp_device = bool(device_id and device_id.startswith("uniapp_"))
         try:
             begin_time = time.time()
             
             # ========== UniApp 设备自动创建 ==========
-            device_id = self.headers.get("device-id")
             device_created = False
             
             # 如果是 UniApp 设备且启用自动创建，则先尝试创建设备
@@ -554,8 +719,9 @@ class ConnectionHandler:
                         time.sleep(retry_delay)
                         continue
                     else:
-                        # 最后一次重试也失败，设置 need_bind
-                        self.need_bind = True
+                        # UniApp 走软件客户端链路，不进入硬件绑定语义
+                        if not is_uniapp_device:
+                            self.need_bind = True
                         private_config = {}
                         break
             
@@ -569,12 +735,22 @@ class ConnectionHandler:
                 self.logger.bind(tag=TAG).warning("未能获取差异化配置，将使用默认配置")
                 
         except DeviceBindException as e:
-            self.need_bind = True
-            self.bind_code = e.bind_code
+            if not is_uniapp_device:
+                self.need_bind = True
+                self.bind_code = e.bind_code
+            else:
+                self.logger.bind(tag=TAG).warning(
+                    f"UniApp 设备忽略硬件绑定异常，降级使用当前配置: {e}"
+                )
             private_config = {}
         except Exception as e:
-            self.need_bind = True
-            self.logger.bind(tag=TAG).error(f"获取差异化配置失败: {e}")
+            if not is_uniapp_device:
+                self.need_bind = True
+                self.logger.bind(tag=TAG).error(f"获取差异化配置失败: {e}")
+            else:
+                self.logger.bind(tag=TAG).warning(
+                    f"UniApp 私有配置获取失败，继续使用当前配置: {e}"
+                )
             private_config = {}
 
         init_llm, init_tts, init_memory, init_intent = (
@@ -766,12 +942,14 @@ class ConnectionHandler:
         if self.memory is None:
             return
         """初始化记忆模块"""
+        role_id = self._build_memory_scope_key()
         self.memory.init_memory(
-            role_id=self.device_id,
+            role_id=role_id,
             llm=self.llm,
             summary_memory=self.config.get("summaryMemory", None),
             save_to_file=not self.read_config_from_api,
         )
+        self.current_memory_scope_key = role_id
 
         # 获取记忆总结配置
         memory_config = self.config["Memory"]
@@ -803,6 +981,34 @@ class ConnectionHandler:
                 # 否则使用主LLM
                 self.memory.set_llm(self.llm)
                 self.logger.bind(tag=TAG).info("使用主LLM作为意图识别模型")
+
+    def _build_memory_scope_key(self) -> str | None:
+        return build_memory_scope_key(
+            getattr(self, "device_id", None),
+            getattr(self, "current_agent_id", None),
+        )
+
+    def _ensure_memory_scope(self) -> str | None:
+        memory_scope_key = self._build_memory_scope_key()
+        self.current_memory_scope_key = memory_scope_key
+        if self.memory is None or not memory_scope_key:
+            return memory_scope_key
+        previous_role_id = getattr(self.memory, "role_id", None)
+        if previous_role_id == memory_scope_key:
+            return memory_scope_key
+        try:
+            self.memory.init_memory(
+                role_id=memory_scope_key,
+                llm=self.llm,
+                summary_memory=self.config.get("summaryMemory", None),
+                save_to_file=not self.read_config_from_api,
+            )
+            self.logger.bind(tag=TAG).info(
+                f"memory scope rebound: {previous_role_id} -> {memory_scope_key}"
+            )
+        except Exception as e:
+            self.logger.bind(tag=TAG).warning(f"memory scope rebind failed: {e}")
+        return memory_scope_key
 
     def _initialize_intent(self):
         if self.intent is None:
@@ -880,6 +1086,10 @@ class ConnectionHandler:
                 device_id,
                 user_id
             )
+
+            agent_id = result.get('agent_id') if isinstance(result, dict) else None
+            if agent_id:
+                self.current_agent_id = str(agent_id)
             
             if result.get('created'):
                 self.logger.bind(tag=TAG).info(
@@ -1099,10 +1309,12 @@ class ConnectionHandler:
             functions = self.func_handler.get_functions()
         response_message = []
 
+        chat_start_ts = perf_counter()
         try:
             # 使用带记忆的对话
             memory_str = None
             original_dialogue = None
+            memory_scope_key = self._ensure_memory_scope()
             if self.memory is not None:
                 future = asyncio.run_coroutine_threadsafe(
                     self.memory.query_memory(query), self.loop
@@ -1113,8 +1325,8 @@ class ConnectionHandler:
             persona_injected = False
             user_id = None
             memory_user_id = self.device_id
-            memory_scope_key = memory_user_id
             persona_summary = ""
+            episodic_store = None
 
             if self.device_id and self.device_id.startswith("uniapp_"):
                 user_id = self.device_id[7:]  # 提取 user_id
@@ -1136,10 +1348,8 @@ class ConnectionHandler:
 
             # 记忆按 agent + 用户(或设备) 进行隔离，避免多智能体串用
             if memory_user_id:
-                agent_scope = getattr(self, "current_agent_id", None)
-                memory_scope_key = (
-                    f"{agent_scope}::{memory_user_id}" if agent_scope else memory_user_id
-                )
+                memory_scope_key = self._build_memory_scope_key()
+            self.current_memory_scope_key = memory_scope_key
 
             # Dialogue policy + music signals (safe, optional)
             policy_conf = self.config.get("dialogue_policy", {}) or {}
@@ -1154,6 +1364,7 @@ class ConnectionHandler:
                 from core.utils.episodic_memory import EpisodicMemoryStore
                 from core.utils.stable_memory import StableMemoryStore
                 from core.utils.memory_packer import extract_long_term_items, pack
+                from core.utils.personality_baseline import build_personality_baseline
 
                 if policy_conf.get("enabled", True):
                     music_signals = {}
@@ -1171,11 +1382,14 @@ class ConnectionHandler:
                         music_signals=music_signals,
                         policy_state=getattr(self, "dialogue_policy_state", {}),
                         current_user_text=query,
+                        entry_context=getattr(self, "entry_context", {}),
                     )
+                    self.last_policy = dict(policy or {})
                     self.dialogue_policy_state = policy.get("next_policy_state", {})
                     self._emit_policy_event(
                         "policy_decision",
                         {
+                            "companionship_need": policy.get("companionship_need"),
                             "intent": policy.get("intent"),
                             "intent_label": policy.get("intent_label"),
                             "tone": policy.get("tone"),
@@ -1192,6 +1406,11 @@ class ConnectionHandler:
                             "music_soft_confirmation": policy.get("music_soft_confirmation"),
                             "need_confirmation": policy.get("need_confirmation"),
                             "confirmation_status": policy.get("confirmation_status"),
+                            "ui_state_hint": derive_ui_state_hint(
+                                policy.get("companionship_need"),
+                                phase="policy",
+                            ),
+                            "entry_context": getattr(self, "entry_context", {}),
                         },
                     )
                     policy_prompt = render_policy_constraints(policy).strip()
@@ -1202,17 +1421,50 @@ class ConnectionHandler:
                     )
 
                 # Build blocks
-                base_system_prompt = self.prompt or ""
+                base_system_prompt = self._append_mimo_tts_prompt_rules(self.prompt or "")
                 policy_block = PromptBlock(
                     text=policy_prompt,
                     usage_hint="必须遵守以下策略。",
                     enabled=bool(policy_prompt),
                 )
+                personality_prompt = build_personality_baseline(self.config)
+                personality_block = PromptBlock(
+                    text=personality_prompt,
+                    usage_hint="这是助手自身的长期表达基线，不是用户画像；不得覆盖本轮安全策略。",
+                    enabled=bool(personality_prompt),
+                )
                 persona_block = PromptBlock(
                     text=persona_summary,
-                    usage_hint="用于风格，但不得编造事实。",
+                    usage_hint="仅用于长期偏好和风格参考，不得推断当前情绪结论。",
                     enabled=bool(persona_summary),
                 )
+                vision_context = getattr(self, "pending_visual_context", None) or {}
+                vision_text = ""
+                if vision_context:
+                    entities = vision_context.get("vision_entities") or []
+                    if isinstance(entities, list):
+                        entities_text = "、".join([str(item) for item in entities[:3] if str(item).strip()])
+                    else:
+                        entities_text = str(entities)
+                    vision_lines = []
+                    summary = str(vision_context.get("vision_summary") or "").strip()
+                    if summary:
+                        vision_lines.append(f"图片概述：{summary}")
+                    if entities_text:
+                        vision_lines.append(f"主要元素：{entities_text}")
+                    hint = str(vision_context.get("vision_emotion_hint") or "").strip()
+                    if hint:
+                        vision_lines.append(f"氛围线索：{hint}")
+                    source = str(vision_context.get("source") or "").strip()
+                    if source:
+                        vision_lines.append(f"来源：{source}")
+                    vision_text = "\n".join(vision_lines).strip()
+                vision_block = PromptBlock(
+                    text=vision_text,
+                    usage_hint="这是用户刚分享图片的弱视觉上下文，不得当作确定事实，需结合用户文字自然回应。",
+                    enabled=bool(vision_text),
+                )
+                self.pending_visual_context = None
                 state_text = StateManager.export_for_prompt(
                     getattr(self, "dialogue_policy_state", {}), self.last_intent
                 )
@@ -1227,6 +1479,7 @@ class ConnectionHandler:
                 long_term_items = []
                 if memory_scope_key:
                     stable_store = StableMemoryStore()
+                    episodic_store = EpisodicMemoryStore()
                     try:
                         if policy_conf.get("enable_stable_memory", True):
                             stable_store.update_from_user_text(memory_scope_key, query)
@@ -1238,7 +1491,8 @@ class ConnectionHandler:
                             f"stable memory fetch failed: {e}"
                         )
                     try:
-                        episodic_items = EpisodicMemoryStore().query_relevant_struct(
+                        episodic_store.observe_user_input(memory_scope_key, query)
+                        episodic_items = episodic_store.query_relevant_struct(
                             memory_scope_key, query, limit=3
                         )
                     except Exception as e:
@@ -1274,7 +1528,9 @@ class ConnectionHandler:
 
                 blocks = PromptBlocks(
                     policy_block=policy_block,
+                    personality_block=personality_block,
                     persona_block=persona_block,
+                    vision_block=vision_block,
                     state_block=state_block,
                     memory_block=memory_block,
                 )
@@ -1284,18 +1540,21 @@ class ConnectionHandler:
                 self.dialogue.update_system_message(final_system_prompt)
 
                 # logging stats
+                policy_len = len(policy_block.render())
+                personality_len = len(personality_block.render())
+                persona_len = len(persona_block.render())
+                vision_len = len(vision_block.render())
+                state_len = len(state_block.render())
+                memory_len = len(memory_block.render())
+                system_prompt_len = len(final_system_prompt or "")
                 self.logger.bind(tag=TAG).info(
-                    "prompt_blocks len: policy=%s persona=%s state=%s memory=%s",
-                    len(policy_block.render()),
-                    len(persona_block.render()),
-                    len(state_block.render()),
-                    len(memory_block.render()),
+                    f"prompt_blocks len: policy={policy_len} personality={personality_len} persona={persona_len} vision={vision_len} state={state_len} memory={memory_len} system={system_prompt_len}"
                 )
                 self.logger.bind(tag=TAG).info(
-                    "memory_packer stats: %s", memory_stats
+                    f"memory_packer stats: {memory_stats}"
                 )
                 self.logger.bind(tag=TAG).info(
-                    "prompt_blocks inject: %s", block_stats
+                    f"prompt_blocks inject: {block_stats}"
                 )
                 # Emit block usage for frontend visibility.
                 self._emit_policy_event(
@@ -1308,11 +1567,23 @@ class ConnectionHandler:
                                 "inject_mode": block_stats.get("policy"),
                                 "preview": policy_block.render()[:160],
                             },
+                            "personality": {
+                                "enabled": bool(personality_block.enabled and personality_block.text),
+                                "length": len(personality_block.render()),
+                                "inject_mode": block_stats.get("personality"),
+                                "preview": personality_block.render()[:160],
+                            },
                             "persona": {
                                 "enabled": bool(persona_block.enabled and persona_block.text),
                                 "length": len(persona_block.render()),
                                 "inject_mode": block_stats.get("persona"),
                                 "preview": persona_block.render()[:160],
+                            },
+                            "vision": {
+                                "enabled": bool(vision_block.enabled and vision_block.text),
+                                "length": len(vision_block.render()),
+                                "inject_mode": block_stats.get("vision"),
+                                "preview": vision_block.render()[:160],
                             },
                             "state": {
                                 "enabled": bool(state_block.enabled and state_block.text),
@@ -1339,21 +1610,33 @@ class ConnectionHandler:
             except Exception as e:
                 self.logger.bind(tag=TAG).warning(f"Dialogue policy build failed: {e}")
 
+            llm_dialogue_payload = self.dialogue.get_llm_dialogue_with_memory(
+                None, None, self.config.get("voiceprint", {})
+            )
+            llm_dialogue_chars = len(
+                json.dumps(llm_dialogue_payload, ensure_ascii=False)
+            )
+            llm_model = getattr(
+                self.llm,
+                "model_name",
+                getattr(self.llm, "model", self.llm.__class__.__name__),
+            )
+            llm_stream_start_ts = perf_counter()
+            self.logger.bind(tag=TAG).info(
+                f"llm request start: model={llm_model}, intent_type={self.intent_type}, depth={depth}, dialogue_chars={llm_dialogue_chars}, chat_elapsed={llm_stream_start_ts - chat_start_ts:.3f}s"
+            )
+
             if self.intent_type == "function_call" and functions is not None:
                 # 使用支持functions的streaming接口
                 llm_responses = self.llm.response_with_functions(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        None, None, self.config.get("voiceprint", {})
-                    ),
+                    llm_dialogue_payload,
                     functions=functions,
                 )
             else:
                 llm_responses = self.llm.response(
                     self.session_id,
-                    self.dialogue.get_llm_dialogue_with_memory(
-                        None, None, self.config.get("voiceprint", {})
-                    ),
+                    llm_dialogue_payload,
                 )
         except Exception as e:
             self.logger.bind(tag=TAG).error(f"LLM 处理出错 {query}: {e}")
@@ -1367,8 +1650,20 @@ class ConnectionHandler:
         content_arguments = ""
         self.client_abort = False
         emotion_flag = True
+        llm_first_chunk_ts = None
+        llm_chunk_count = 0
+        llm_text_chars = 0
+        sentence_buffer = ""
+        reply_turn = self._create_reply_turn() if is_uniapp_client else None
+        if reply_turn:
+            asyncio.run_coroutine_threadsafe(
+                self._dispatch_sentence_audio_in_order(reply_turn),
+                self.loop,
+            )
         for response in llm_responses:
             if self.client_abort:
+                if reply_turn:
+                    reply_turn.aborted = True
                 break
             if self.intent_type == "function_call" and functions is not None:
                 content, tools_call = response
@@ -1393,6 +1688,13 @@ class ConnectionHandler:
             else:
                 content = response
 
+            llm_chunk_count += 1
+            if llm_first_chunk_ts is None:
+                llm_first_chunk_ts = perf_counter()
+                self.logger.bind(tag=TAG).info(
+                    f"llm first chunk: latency={llm_first_chunk_ts - llm_stream_start_ts:.3f}s, chunk_index={llm_chunk_count}"
+                )
+
             # 在llm回复中获取情绪表情，一轮对话只在开头获取一次
             if emotion_flag and content is not None and content.strip():
                 asyncio.run_coroutine_threadsafe(
@@ -1402,8 +1704,25 @@ class ConnectionHandler:
                 emotion_flag = False
 
             if content is not None and len(content) > 0:
+                llm_text_chars += len(content)
                 if not tool_call_flag:
                     response_message.append(content)
+                    if reply_turn:
+                        sentence_buffer += content
+                        pending_count = self._pending_sentence_count(reply_turn)
+                        backpressure_active = (
+                            pending_count
+                            >= self._sentence_pipeline_config["max_pending_sentences"]
+                        )
+                        sentences, sentence_buffer = self._build_sentences_from_buffer(
+                            sentence_buffer,
+                            force_flush=False,
+                            backpressure_active=backpressure_active,
+                        )
+                        for item in sentences:
+                            sentence = self._register_sentence_unit(reply_turn, item)
+                            self._send_sentence_text_chunk(reply_turn, sentence)
+                            self._schedule_sentence_audio(reply_turn, sentence)
                     # UniApp 客户端跳过 TTS 队列操作
                     if not is_uniapp_client and hasattr(self, 'tts') and self.tts is not None:
                         self.tts.tts_text_queue.put(
@@ -1460,6 +1779,9 @@ class ConnectionHandler:
                     ),
                     self.loop,
                 ).result()
+                if reply_turn:
+                    reply_turn.llm_completed = True
+                    self._wait_reply_turn_completion(reply_turn)
                 self._handle_function_result(result, function_call_data, depth=depth)
 
         # 存储对话内容
@@ -1467,10 +1789,44 @@ class ConnectionHandler:
             text_buff = "".join(response_message)
             self.tts_MessageText = text_buff
             self.dialogue.put(Message(role="assistant", content=text_buff))
-            
+            self._update_episodic_memory(
+                memory_scope_key, query, text_buff, episodic_store
+            )
+
             # 为 UniApp 客户端发送 WebSocket 回复
-            if is_uniapp_client:
-                self._dispatch_uniapp_response(text_buff)
+            if is_uniapp_client and reply_turn:
+                final_sentences, sentence_buffer = self._build_sentences_from_buffer(
+                    sentence_buffer,
+                    force_flush=True,
+                    backpressure_active=False,
+                )
+                for idx, item in enumerate(final_sentences):
+                    sentence = self._register_sentence_unit(
+                        reply_turn,
+                        item,
+                        is_final=(idx == len(final_sentences) - 1),
+                    )
+                    self._send_sentence_text_chunk(reply_turn, sentence)
+                    self._schedule_sentence_audio(reply_turn, sentence)
+                reply_turn.llm_completed = True
+                self._wait_reply_turn_completion(reply_turn)
+        elif reply_turn:
+            reply_turn.llm_completed = True
+            if sentence_buffer.strip():
+                final_sentences, sentence_buffer = self._build_sentences_from_buffer(
+                    sentence_buffer,
+                    force_flush=True,
+                    backpressure_active=False,
+                )
+                for idx, item in enumerate(final_sentences):
+                    sentence = self._register_sentence_unit(
+                        reply_turn,
+                        item,
+                        is_final=(idx == len(final_sentences) - 1),
+                    )
+                    self._send_sentence_text_chunk(reply_turn, sentence)
+                    self._schedule_sentence_audio(reply_turn, sentence)
+            self._wait_reply_turn_completion(reply_turn)
         
         if depth == 0:
             # UniApp 客户端跳过 TTS 队列操作
@@ -1487,7 +1843,19 @@ class ConnectionHandler:
         if persona_injected and original_dialogue is not None:
             self.dialogue.dialogue = original_dialogue
             self.logger.bind(tag=TAG).debug("已恢复原始对话上下文")
-        
+
+        llm_end_ts = perf_counter()
+        first_chunk_latency = (
+            llm_first_chunk_ts - llm_stream_start_ts
+            if llm_first_chunk_ts is not None
+            else None
+        )
+        self.logger.bind(tag=TAG).info(
+            f"llm stream done: model={llm_model}, chunks={llm_chunk_count}, text_chars={llm_text_chars}, first_chunk_latency={first_chunk_latency:.3f}s total_llm_time={llm_end_ts - llm_stream_start_ts:.3f}s total_chat_time={llm_end_ts - chat_start_ts:.3f}s tool_call={tool_call_flag}"
+            if first_chunk_latency is not None
+            else f"llm stream done: model={llm_model}, chunks={llm_chunk_count}, text_chars={llm_text_chars}, first_chunk_latency=none total_llm_time={llm_end_ts - llm_stream_start_ts:.3f}s total_chat_time={llm_end_ts - chat_start_ts:.3f}s tool_call={tool_call_flag}"
+        )
+
         self.llm_finish_task = True
         # 使用lambda延迟计算，只有在DEBUG级别时才执行get_llm_dialogue()
         self.logger.bind(tag=TAG).debug(
@@ -1498,6 +1866,33 @@ class ConnectionHandler:
 
         return True
 
+    def _update_episodic_memory(
+        self,
+        memory_scope_key: str | None,
+        user_text: str,
+        assistant_text: str,
+        episodic_store=None,
+    ) -> None:
+        if not memory_scope_key or not user_text or not assistant_text:
+            return
+        try:
+            if episodic_store is None:
+                from core.utils.episodic_memory import EpisodicMemoryStore
+
+                episodic_store = EpisodicMemoryStore()
+            store = episodic_store
+            store.update_from_turn(
+                memory_scope_key,
+                user_text,
+                assistant_text,
+                context=build_episodic_turn_context(
+                    getattr(self, "entry_context", {}),
+                    getattr(self, "last_policy", {}).get("companionship_need"),
+                ),
+            )
+        except Exception as e:
+            self.logger.bind(tag=TAG).debug(f"episodic memory write failed: {e}")
+
     def _handle_function_result(self, result, function_call_data, depth):
         if result.action == Action.RESPONSE:  # 直接回复前端
             text = result.response
@@ -1506,6 +1901,11 @@ class ConnectionHandler:
             else:
                 self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=text)
             self.dialogue.put(Message(role="assistant", content=text))
+            self._update_episodic_memory(
+                getattr(self, "current_memory_scope_key", None),
+                getattr(self, "last_user_message", "") or "",
+                text,
+            )
         elif result.action == Action.REQLLM:  # 调用函数后再请求llm生成回复
             text = result.result
             if text is not None and len(text) > 0:
@@ -1550,133 +1950,713 @@ class ConnectionHandler:
             else:
                 self.tts.tts_one_sentence(self, ContentType.TEXT, content_detail=text)
             self.dialogue.put(Message(role="assistant", content=text))
+            self._update_episodic_memory(
+                getattr(self, "current_memory_scope_key", None),
+                getattr(self, "last_user_message", "") or "",
+                text,
+            )
         else:
             pass
 
-    def _build_uniapp_speech_plan(self, text: str) -> Dict[str, str]:
+    def _build_uniapp_speech_plan(self, text: str, turn: ReplyTurn | None = None) -> Dict[str, str]:
         companion_conf = self.config.get("companion", {}) or {}
         return build_speech_plan(
             text,
             user_text=getattr(self, "last_user_message", ""),
             agent_style=companion_conf.get("speaking_style"),
+            turn_style=turn.turn_style if turn else None,
         )
 
-    def _dispatch_uniapp_response(self, text: str) -> None:
-        if not getattr(self, "is_uniapp_client", False):
-            return
-
-        self.logger.bind(tag=TAG).info(
-            "uniapp response dispatch: enable_audio=%s tts_exists=%s tts_type=%s",
-            getattr(self, "enable_audio_response", False),
-            self.tts is not None,
-            type(self.tts).__name__ if self.tts is not None else None,
+    def _should_use_mimo_prosody_rewrite(self) -> bool:
+        if self.llm is None or self.tts is None:
+            return False
+        selected_tts = (self.config.get("selected_module", {}) or {}).get("TTS")
+        tts_conf = (self.config.get("TTS", {}) or {}).get(selected_tts, {})
+        return (
+            (tts_conf.get("type") or "").lower() == "xiaomimimo"
+            and self._sentence_pipeline_config.get("max_rewrite_sentences", 0) > 0
         )
 
-        if getattr(self, "enable_audio_response", False) and self.tts is not None:
-            speech_plan = self._build_uniapp_speech_plan(text)
-            asyncio.run_coroutine_threadsafe(
-                self._send_uniapp_tts_reply(speech_plan),
-                self.loop,
+    def _is_mimo_tts(self) -> bool:
+        selected_tts = (self.config.get("selected_module", {}) or {}).get("TTS")
+        tts_conf = (self.config.get("TTS", {}) or {}).get(selected_tts, {})
+        return (tts_conf.get("type") or "").lower() == "xiaomimimo"
+
+    def _append_mimo_tts_prompt_rules(self, prompt: str) -> str:
+        if not self._is_mimo_tts():
+            return prompt
+        if MIMO_TTS_PROMPT_RULES in (prompt or ""):
+            return prompt
+        return (prompt or "").rstrip() + "\n\n[MiMo语音合成规则]\n" + MIMO_TTS_PROMPT_RULES + "\n"
+
+    def _rewrite_sentence_for_mimo(
+        self,
+        turn: ReplyTurn,
+        sentence_unit: SentenceUnit,
+        speech_plan: Dict[str, str],
+    ) -> tuple[Dict[str, str], bool]:
+        if not self._should_use_mimo_prosody_rewrite():
+            self.logger.bind(tag=TAG).info(
+                f"sentence_rewrite_skipped: idx={sentence_unit.sentence_index} reason=tts_not_mimo"
             )
-            return
+            return speech_plan, False
+        if sentence_unit.sentence_index >= self._sentence_pipeline_config["max_rewrite_sentences"]:
+            self.logger.bind(tag=TAG).info(
+                f"sentence_rewrite_skipped: idx={sentence_unit.sentence_index} reason=sentence_limit"
+            )
+            return speech_plan, False
+        if turn.rewrite_disabled:
+            self.logger.bind(tag=TAG).info(
+                f"sentence_rewrite_skipped: idx={sentence_unit.sentence_index} reason=turn_fused"
+            )
+            return speech_plan, False
 
+        display_text = (speech_plan.get("display_text") or "").strip()
+        if not display_text:
+            return speech_plan, False
+        if len(re.sub(r"\s+", "", display_text)) < self._sentence_pipeline_config["rewrite_min_chars"]:
+            self.logger.bind(tag=TAG).info(
+                f"sentence_rewrite_skipped: idx={sentence_unit.sentence_index} reason=too_short"
+            )
+            return speech_plan, False
+
+        companion_conf = self.config.get("companion", {}) or {}
+        system_prompt = build_mimo_prosody_system_prompt()
+        user_prompt = build_mimo_prosody_user_prompt(
+            display_text,
+            user_text=getattr(self, "last_user_message", "") or "",
+            speech_mode=getattr(self, "last_intent", "") or "",
+            risk_level=(getattr(self, "dialogue_policy_state", {}) or {}).get(
+                "risk_level", ""
+            ),
+            agent_style=companion_conf.get("speaking_style"),
+        )
+        def _run_rewrite():
+            return self.llm.response_no_stream(
+                system_prompt,
+                user_prompt,
+                max_tokens=96,
+                temperature=0.1,
+            )
+
+        temp_executor = ThreadPoolExecutor(max_workers=1)
+        fallback_used = False
+        try:
+            with self._rewrite_slots:
+                self.logger.bind(tag=TAG).info(
+                    f"sentence_rewrite_start: idx={sentence_unit.sentence_index}"
+                )
+                future = temp_executor.submit(_run_rewrite)
+                raw_text = future.result(
+                    timeout=self._sentence_pipeline_config.get("rewrite_timeout", 2.5)
+                )
+            if is_invalid_mimo_rewrite(raw_text, display_text):
+                self.logger.bind(tag=TAG).warning(
+                    f"sentence_rewrite_fallback: idx={sentence_unit.sentence_index} reason=invalid_output"
+                )
+                fallback_used = True
+                return speech_plan, True
+            assistant_text = extract_mimo_tts_text(
+                raw_text,
+                display_text,
+                fallback_style=speech_plan.get("tts_style") or DEFAULT_STYLE,
+            )
+            speech_plan["assistant_text"] = assistant_text
+            speech_plan["tts_text"] = assistant_text
+            speech_plan["speak_text"] = assistant_text
+            self.logger.bind(tag=TAG).info(
+                f"sentence_rewrite_done: idx={sentence_unit.sentence_index} preview={assistant_text[:80]}"
+            )
+            return speech_plan, False
+        except Exception as e:
+            error_text = str(e)
+            if "timeout" in error_text.lower():
+                self.logger.bind(tag=TAG).warning(
+                    f"sentence_rewrite_timeout: idx={sentence_unit.sentence_index}"
+                )
+            else:
+                self.logger.bind(tag=TAG).warning(
+                    f"sentence_rewrite_fallback: idx={sentence_unit.sentence_index} error={e}"
+                )
+            fallback_used = True
+            return speech_plan, True
+        finally:
+            temp_executor.shutdown(wait=False)
+            if fallback_used:
+                turn.rewrite_failures += 1
+                if turn.rewrite_failures >= 2:
+                    turn.rewrite_disabled = True
+
+    async def _send_uniapp_event(self, payload: Dict[str, Any]) -> None:
+        if not getattr(self, "websocket", None):
+            return
+        await self.websocket.send(json.dumps(payload, ensure_ascii=False))
+
+    def _send_uniapp_event_sync(self, payload: Dict[str, Any]) -> None:
+        if not getattr(self, "websocket", None):
+            return
         asyncio.run_coroutine_threadsafe(
-            self._send_uniapp_reply(text),
+            self._send_uniapp_event(payload),
             self.loop,
+        ).result()
+
+    def _create_reply_turn(self) -> ReplyTurn:
+        mode = "immersive" if self._is_immersive_mode() else "normal"
+        turn = ReplyTurn(
+            message_id=str(uuid.uuid4().hex),
+            session_id=self.session_id,
+            mode=mode,
+            send_text_chunks=(mode == "normal"),
+        )
+        with self.reply_turn_lock:
+            self.current_reply_turn = turn
+            self._active_reply_message_ids.add(turn.message_id)
+        return turn
+
+    def _build_sentence_reply_meta(self, speech_plan: Dict[str, Any] | None = None) -> Dict[str, Any]:
+        return build_reply_meta(
+            getattr(self, "last_policy", {}).get("companionship_need"),
+            speech_plan,
+            phase="response",
         )
 
-    async def _send_uniapp_tts_reply(self, speech_plan: Dict[str, str]):
-        display_text = speech_plan.get("display_text", "")
-        assistant_text = speech_plan.get("assistant_text", display_text)
-        message_id = str(uuid.uuid4().hex)
+    def _emit_reply_start_if_needed(self, turn: ReplyTurn) -> None:
+        if turn.reply_started:
+            return
+        payload = {
+            "type": "reply_start",
+            "message_id": turn.message_id,
+            "session_id": turn.session_id,
+            "mode": turn.mode,
+            "reply_meta": self._build_sentence_reply_meta(),
+        }
+        self._send_uniapp_event_sync(payload)
+        turn.reply_started = True
+
+    async def _emit_reply_start_if_needed_async(self, turn: ReplyTurn) -> None:
+        if turn.reply_started:
+            return
+        payload = {
+            "type": "reply_start",
+            "message_id": turn.message_id,
+            "session_id": turn.session_id,
+            "mode": turn.mode,
+            "reply_meta": self._build_sentence_reply_meta(),
+        }
+        await self._send_uniapp_event(payload)
+        turn.reply_started = True
+
+    def _register_sentence_unit(
+        self, turn: ReplyTurn, display_text: str, is_final: bool = False
+    ) -> SentenceUnit:
+        raw_text = display_text
+        detected_style = extract_mimo_style(raw_text)
+        if detected_style and not turn.turn_style:
+            turn.turn_style = detected_style
+        speech_plan = self._build_uniapp_speech_plan(raw_text, turn)
+        if speech_plan.get("tts_style") and not turn.turn_style:
+            turn.turn_style = speech_plan["tts_style"]
+            speech_plan = self._build_uniapp_speech_plan(raw_text, turn)
+        display_text = speech_plan.get("display_text", raw_text)
+        sentence = SentenceUnit(
+            message_id=turn.message_id,
+            sentence_index=turn.next_sentence_index,
+            display_text=display_text,
+            speak_text=speech_plan.get("assistant_text")
+            or speech_plan.get("tts_text")
+            or display_text,
+            is_final=is_final,
+            reply_meta=self._build_sentence_reply_meta(speech_plan),
+            speech_plan=speech_plan,
+        )
+        turn.sentences[sentence.sentence_index] = sentence
+        turn.next_sentence_index += 1
+        turn.full_display_text += sentence.display_text
+        return sentence
+
+    def _send_sentence_text_chunk(self, turn: ReplyTurn, sentence: SentenceUnit) -> None:
+        if not turn.send_text_chunks or sentence.text_sent:
+            return
+        payload = {
+            "type": "reply_text_chunk",
+            "message_id": turn.message_id,
+            "session_id": turn.session_id,
+            "sentence_index": sentence.sentence_index,
+            "text": sentence.display_text,
+            "is_final_sentence": bool(sentence.is_final and turn.llm_completed),
+            "reply_meta": sentence.reply_meta,
+        }
+        self._emit_reply_start_if_needed(turn)
+        self._send_uniapp_event_sync(payload)
+        sentence.text_sent = True
+
+    def _build_sentence_audio_path(
+        self,
+        turn: ReplyTurn,
+        sentence: SentenceUnit,
+        audio_ext_override: str | None = None,
+    ) -> tuple[str, str, str]:
         audio_dir = self.config.get("uniapp_audio_dir", "data/uniapp_audio")
         audio_base_url = self.config.get(
             "uniapp_audio_base_url", "http://182.254.228.131:8013/audio"
         ).rstrip("/")
-        audio_ext = getattr(self.tts, "audio_file_type", "mp3") or "mp3"
-        audio_filename = f"{self.session_id}_{uuid.uuid4().hex[:8]}.{audio_ext}"
-        audio_path = os.path.join(audio_dir, audio_filename)
+        audio_ext = audio_ext_override or getattr(self.tts, "audio_file_type", "mp3") or "mp3"
+        message_dir = os.path.join(audio_dir, turn.session_id, turn.message_id)
+        os.makedirs(message_dir, exist_ok=True)
+        filename = f"{sentence.sentence_index:03d}_{int(time.time() * 1000)}.{audio_ext}"
+        file_path = os.path.join(message_dir, filename)
+        relative = f"{turn.session_id}/{turn.message_id}/{filename}".replace("\\", "/")
+        return file_path, f"{audio_base_url}/{relative}", audio_ext
 
+    def _generate_sentence_audio(self, turn: ReplyTurn, sentence: SentenceUnit) -> None:
+        if self.client_abort or turn.aborted or self.tts is None:
+            sentence.audio_skipped = True
+            sentence.status = "skipped"
+            turn.audio_terminal_count += 1
+            return
+        pending_audio_jobs = len(
+            [
+                item
+                for item in turn.sentences.values()
+                if item.status in {"queued", "rewriting", "tts"}
+            ]
+        )
+        if (
+            turn.mode == "immersive"
+            and pending_audio_jobs >= self._sentence_pipeline_config["max_pending_audio_jobs"]
+            and sentence.sentence_index >= 2
+            and not turn.first_audio_sent
+        ):
+            sentence.audio_skipped = True
+            sentence.status = "skipped"
+            turn.audio_terminal_count += 1
+            return
+
+        sentence.status = "tts"
+        speech_plan = dict(sentence.speech_plan or {})
+        speech_plan["display_text"] = sentence.display_text
+        speech_plan["speak_text"] = sentence.speak_text
+        speak_text = (
+            speech_plan.get("speak_text")
+            or speech_plan.get("assistant_text")
+            or speech_plan.get("tts_text")
+            or sentence.display_text
+        )
+        sentence.speak_text = speak_text
+        sentence.speech_plan = speech_plan
+        sentence.reply_meta = self._build_sentence_reply_meta(speech_plan)
+        use_streaming_tts = self._is_mimo_tts() and hasattr(self.tts, "stream_text_to_speak")
+        file_path, audio_url, audio_ext = (
+            self._build_sentence_audio_path(
+                turn,
+                sentence,
+                audio_ext_override="wav" if use_streaming_tts else None,
+            )
+        )
+        sentence.audio_path = file_path
+        if file_path:
+            self._pending_sentence_audio_files.add(file_path)
+        self.logger.bind(tag=TAG).info(
+            f"sentence_tts_start: idx={sentence.sentence_index} stream={use_streaming_tts}"
+        )
         try:
-            self.logger.bind(tag=TAG).info(f"UniApp TTS display_text: {display_text}")
-            self.logger.bind(tag=TAG).info(f"UniApp TTS assistant_text: {assistant_text}")
-
-            reply = {
-                "type": "reply",
-                "text": display_text,
-                "session_id": self.session_id,
-                "state": "end",
-                "message_id": message_id,
-            }
-            await self.websocket.send(json.dumps(reply, ensure_ascii=False))
+            with self._tts_slots:
+                if use_streaming_tts:
+                    chunk_count = 0
+                    pcm_chunks = []
+                    sentence.audio_format = "wav"
+                    sentence.status = "tts"
+                    for audio_base64 in self.tts.stream_text_to_speak(speak_text):
+                        if self.client_abort or turn.aborted:
+                            sentence.audio_skipped = True
+                            sentence.status = "skipped"
+                            sentence.audio_failure_reason = "aborted"
+                            return
+                        pcm_chunks.append(audio_base64)
+                        sentence.audio_chunk_count += 1
+                        chunk_count += 1
+                    if chunk_count <= 0:
+                        raise TTSException("xiaomimimo TTS stream returned no audio chunks")
+                    wav_bytes = pcm16_base64_chunks_to_wav_bytes(
+                        pcm_chunks,
+                        sample_rate=24000,
+                        channels=1,
+                    )
+                    sentence.audio_duration_ms = pcm16_base64_chunks_duration_ms(
+                        pcm_chunks,
+                        sample_rate=24000,
+                        channels=1,
+                    )
+                    with open(file_path, "wb") as audio_file:
+                        audio_file.write(wav_bytes)
+                    sentence.audio_url = audio_url
+                    sentence.audio_base64 = None
+                    sentence.audio_stream_done = True
+                    sentence.audio_ready_timestamp_ms = int(time.time() * 1000)
+                    sentence.status = "audio_ready"
+                else:
+                    asyncio.run(self.tts.text_to_speak(speak_text, file_path))
+            if self.client_abort or turn.aborted:
+                sentence.audio_skipped = True
+                sentence.status = "skipped"
+                sentence.audio_failure_reason = "aborted"
+                if file_path and os.path.exists(file_path):
+                    os.remove(file_path)
+                turn.audio_terminal_count += 1
+                if file_path:
+                    self._pending_sentence_audio_files.discard(file_path)
+                return
+            if not use_streaming_tts:
+                sentence.audio_url = audio_url
+                sentence.audio_format = audio_ext
+                sentence.audio_ready_timestamp_ms = int(time.time() * 1000)
+                sentence.status = "audio_ready"
             self.logger.bind(tag=TAG).info(
-                f"已发送 UniApp 文本回复: text={display_text[:50]}..., message_id={message_id}"
+                f"sentence_tts_end: idx={sentence.sentence_index} path={file_path} chunks={sentence.audio_chunk_count}"
             )
-
-            os.makedirs(audio_dir, exist_ok=True)
-            await self.tts.text_to_speak(assistant_text, audio_path)
-
-            audio_reply = {
-                "type": "reply_audio",
-                "session_id": self.session_id,
-                "message_id": message_id,
-                "audio_url": f"{audio_base_url}/{audio_filename}",
-                "audio_format": audio_ext,
-            }
-            await self.websocket.send(json.dumps(audio_reply, ensure_ascii=False))
-            self.logger.bind(tag=TAG).info(
-                f"已发送 UniApp 音频回复: message_id={message_id}, audio={audio_reply['audio_url']}"
+        except Exception as e:
+            sentence.audio_failed = True
+            sentence.audio_skipped = True
+            sentence.status = "audio_failed"
+            sentence.audio_failure_reason = str(e)
+            self.logger.bind(tag=TAG).warning(
+                f"sentence_tts_failed: idx={sentence.sentence_index} error={e}"
             )
+            if file_path and os.path.exists(file_path):
+                os.remove(file_path)
+            if file_path:
+                self._pending_sentence_audio_files.discard(file_path)
+        finally:
+            if sentence.status in {"audio_failed", "skipped"}:
+                turn.audio_terminal_count += 1
 
-            if self.chat_history_conf > 0 and self.report_tts_enable:
-                try:
-                    with open(audio_path, "rb") as audio_file:
-                        report_audio_bytes = audio_file.read()
+    async def _dispatch_sentence_audio_in_order(self, turn: ReplyTurn) -> None:
+        while not turn.audio_dispatch_done:
+            if turn.aborted and turn.audio_terminal_count >= len(turn.sentences):
+                break
+            sentence = turn.sentences.get(turn.next_audio_dispatch_index)
+            if sentence is None:
+                if turn.llm_completed and turn.next_audio_dispatch_index >= len(turn.sentences):
+                    break
+                await asyncio.sleep(0.05)
+                continue
+
+            if sentence.status in {"audio_streaming", "audio_stream_done", "audio_failed"}:
+                while not sentence.audio_chunks.empty():
+                    audio_base64 = sentence.audio_chunks.get_nowait()
+                    await self._emit_reply_start_if_needed_async(turn)
+                    if not sentence.audio_started_sent:
+                        await self._send_uniapp_event(
+                            {
+                                "type": "reply_audio_start",
+                                "message_id": turn.message_id,
+                                "session_id": turn.session_id,
+                                "sentence_index": sentence.sentence_index,
+                                "audio_format": "pcm16",
+                                "sample_rate": 24000,
+                                "channels": 1,
+                                "reply_meta": sentence.reply_meta,
+                            }
+                        )
+                        sentence.audio_started_sent = True
+                    await self._send_uniapp_event(
+                        {
+                            "type": "reply_audio_delta",
+                            "message_id": turn.message_id,
+                            "session_id": turn.session_id,
+                            "sentence_index": sentence.sentence_index,
+                            "audio_base64": audio_base64,
+                            "reply_meta": sentence.reply_meta,
+                        }
+                    )
+                    if not turn.first_audio_sent:
+                        self.logger.bind(tag=TAG).info(
+                            f"first_audio_sent: idx={sentence.sentence_index}"
+                        )
+                        turn.first_audio_sent = True
+
+                if sentence.status == "audio_stream_done":
+                    await self._emit_reply_start_if_needed_async(turn)
+                    if not sentence.audio_started_sent:
+                        await self._send_uniapp_event(
+                            {
+                                "type": "reply_audio_start",
+                                "message_id": turn.message_id,
+                                "session_id": turn.session_id,
+                                "sentence_index": sentence.sentence_index,
+                                "audio_format": "pcm16",
+                                "sample_rate": 24000,
+                                "channels": 1,
+                                "reply_meta": sentence.reply_meta,
+                            }
+                        )
+                        sentence.audio_started_sent = True
+                    await self._send_uniapp_event(
+                        {
+                            "type": "reply_audio_done",
+                            "message_id": turn.message_id,
+                            "session_id": turn.session_id,
+                            "sentence_index": sentence.sentence_index,
+                            "reply_meta": sentence.reply_meta,
+                        }
+                    )
+                    sentence.audio_sent = True
+                    turn.next_audio_dispatch_index += 1
+                    turn.audio_terminal_count += 1
+                    if not turn.first_audio_sent:
+                        self.logger.bind(tag=TAG).info(
+                            f"first_audio_sent: idx={sentence.sentence_index}"
+                        )
+                        turn.first_audio_sent = True
+                    continue
+
+                if sentence.status == "audio_failed" and sentence.audio_chunks.empty():
+                    await self._emit_reply_start_if_needed_async(turn)
+                    await self._send_uniapp_event(
+                        {
+                            "type": "reply_audio_failed",
+                            "message_id": turn.message_id,
+                            "session_id": turn.session_id,
+                            "sentence_index": sentence.sentence_index,
+                            "reason": sentence.audio_failure_reason or "tts_failed",
+                            "reply_meta": sentence.reply_meta,
+                        }
+                    )
+                    sentence.audio_sent = True
+                    turn.next_audio_dispatch_index += 1
+                    continue
+
+            if sentence.status == "audio_ready" and not sentence.audio_sent:
+                await self._emit_reply_start_if_needed_async(turn)
+                sentence.audio_sent_timestamp_ms = int(time.time() * 1000)
+                sentence.audio_start_ms = turn.audio_timeline_ms
+                if sentence.audio_duration_ms is not None:
+                    sentence.audio_end_ms = sentence.audio_start_ms + sentence.audio_duration_ms
+                else:
+                    sentence.audio_end_ms = None
+                payload = {
+                    "type": "reply_audio_chunk",
+                    "message_id": turn.message_id,
+                    "session_id": turn.session_id,
+                    "sentence_index": sentence.sentence_index,
+                    "audio_url": sentence.audio_url,
+                    "audio_base64": sentence.audio_base64,
+                    "audio_format": sentence.audio_format,
+                    "audio_start_ms": sentence.audio_start_ms,
+                    "audio_end_ms": sentence.audio_end_ms,
+                    "audio_duration_ms": sentence.audio_duration_ms,
+                    "audio_ready_timestamp_ms": sentence.audio_ready_timestamp_ms,
+                    "server_timestamp_ms": sentence.audio_sent_timestamp_ms,
+                    "reply_meta": sentence.reply_meta,
+                }
+                await self._send_uniapp_event(payload)
+                sentence.audio_sent = True
+                turn.next_audio_dispatch_index += 1
+                turn.audio_terminal_count += 1
+                if sentence.audio_duration_ms is not None:
+                    turn.audio_timeline_ms = sentence.audio_end_ms or turn.audio_timeline_ms
+                if sentence.audio_path:
+                    self._pending_sentence_audio_files.discard(sentence.audio_path)
+                    turn.sent_audio_files.append(sentence.audio_path)
+                if not turn.first_audio_sent:
+                    self.logger.bind(tag=TAG).info(
+                        f"first_audio_sent: idx={sentence.sentence_index}"
+                    )
+                    turn.first_audio_sent = True
+                continue
+
+            if sentence.status in {"audio_failed", "skipped"}:
+                if not sentence.audio_sent:
+                    await self._emit_reply_start_if_needed_async(turn)
+                    await self._send_uniapp_event(
+                        {
+                            "type": "reply_audio_failed",
+                            "message_id": turn.message_id,
+                            "session_id": turn.session_id,
+                            "sentence_index": sentence.sentence_index,
+                            "reason": sentence.audio_failure_reason or sentence.status,
+                            "reply_meta": sentence.reply_meta,
+                        }
+                    )
+                    sentence.audio_sent = True
+                turn.next_audio_dispatch_index += 1
+                continue
+
+            await asyncio.sleep(0.05)
+
+        turn.audio_dispatch_done = True
+
+    def _schedule_sentence_audio(self, turn: ReplyTurn, sentence: SentenceUnit) -> None:
+        if self.tts is None or not getattr(self, "enable_audio_response", False):
+            sentence.audio_skipped = True
+            sentence.status = "skipped"
+            turn.audio_terminal_count += 1
+            return
+        sentence.status = "queued"
+        self.executor.submit(self._generate_sentence_audio, turn, sentence)
+
+    def _finalize_reply_turn(self, turn: ReplyTurn) -> None:
+        if turn.text_final_sent:
+            return
+        full_text = (turn.full_display_text or "").strip()
+        payload = {
+            "type": "reply_text_final",
+            "message_id": turn.message_id,
+            "session_id": turn.session_id,
+            "text": full_text,
+            "sentence_count": len(turn.sentences),
+            "reply_meta": self._build_sentence_reply_meta(),
+        }
+        self._emit_reply_start_if_needed(turn)
+        self._send_uniapp_event_sync(payload)
+        turn.text_final_sent = True
+        from core.handle.reportHandle import enqueue_tts_report
+
+        enqueue_tts_report(self, full_text, [])
+        compatibility_reply = {
+            "type": "reply",
+            "text": full_text,
+            "session_id": self.session_id,
+            "state": "complete",
+            "message_id": turn.message_id,
+        }
+        compatibility_reply.update(self._build_sentence_reply_meta())
+        self._send_uniapp_event_sync(compatibility_reply)
+
+    def _emit_reply_end(self, turn: ReplyTurn, status: str) -> None:
+        if turn.reply_end_sent:
+            return
+        if turn.sent_audio_files and self.chat_history_conf > 0 and self.report_tts_enable:
+            try:
+                audio_bytes = bytearray()
+                for audio_path in turn.sent_audio_files:
+                    if os.path.exists(audio_path):
+                        with open(audio_path, "rb") as audio_file:
+                            audio_bytes.extend(audio_file.read())
+                if audio_bytes:
                     report_time_ms = int(time.time() * 1000)
                     agent_id = getattr(self, "current_agent_id", None)
                     self.executor.submit(
                         report_with_audio_bytes,
                         self,
                         2,
-                        display_text,
-                        report_audio_bytes,
+                        (turn.full_display_text or "").strip(),
+                        bytes(audio_bytes),
                         report_time_ms,
                         agent_id,
                     )
-                except Exception as report_error:
-                    self.logger.bind(tag=TAG).error(
-                        f"异步上报 UniApp 音频聊天记录失败: {report_error}"
-                    )
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"发送 UniApp TTS 回复失败: {e}")
-            if display_text:
-                await self._send_uniapp_reply(display_text, message_id=message_id)
+            except Exception as e:
+                self.logger.bind(tag=TAG).warning(
+                    f"uniapp sentence audio report failed: {e}"
+                )
+        payload = {
+            "type": "reply_end",
+            "message_id": turn.message_id,
+            "session_id": turn.session_id,
+            "status": status,
+            "sentence_count": len(turn.sentences),
+            "audio_chunk_count": len([s for s in turn.sentences.values() if s.audio_sent]),
+            "reply_meta": self._build_sentence_reply_meta(),
+        }
+        self._send_uniapp_event_sync(payload)
+        turn.reply_end_sent = True
+        with self.reply_turn_lock:
+            self._active_reply_message_ids.discard(turn.message_id)
+            if self.current_reply_turn and self.current_reply_turn.message_id == turn.message_id:
+                self.current_reply_turn = None
+
+    def _wait_reply_turn_completion(self, turn: ReplyTurn) -> None:
+        while True:
+            if turn.aborted:
+                break
+            sentence_count = len(turn.sentences)
+            if turn.llm_completed and turn.audio_terminal_count >= sentence_count:
+                break
+            time.sleep(0.05)
+        while not turn.audio_dispatch_done:
+            time.sleep(0.05)
+        if turn.text_final_sent:
+            return
+        if not turn.sentences and not turn.full_display_text.strip():
+            self._emit_reply_end(turn, "aborted" if turn.aborted else "completed")
+            return
+        if turn.aborted and not turn.full_display_text.strip():
+            self._emit_reply_end(turn, "aborted")
+            return
+        status = "completed"
+        if turn.aborted:
+            status = "aborted"
+        elif any(sentence.audio_failed for sentence in turn.sentences.values()):
+            status = "partial"
+        self._finalize_reply_turn(turn)
+        self._emit_reply_end(turn, status)
+
+    def _build_sentences_from_buffer(
+        self,
+        buffer: str,
+        *,
+        force_flush: bool,
+        backpressure_active: bool,
+    ) -> tuple[list[str], str]:
+        soft_limit, hard_limit = self._get_sentence_limits()
+        local_force_flush = force_flush
+        if backpressure_active and len(buffer) < hard_limit * 2 and not force_flush:
+            return [], buffer
+        if backpressure_active and len(buffer) >= hard_limit * 2:
+            local_force_flush = True
+        return split_sentence_buffer(
+            buffer,
+            soft_limit=soft_limit,
+            hard_limit=hard_limit,
+            min_sentence_chars=self._sentence_pipeline_config["min_sentence_chars"],
+            force_flush=local_force_flush,
+        )
+
+    def _pending_sentence_count(self, turn: ReplyTurn) -> int:
+        return len(
+            [
+                item
+                for item in turn.sentences.values()
+                if (
+                    item.status not in {"audio_ready", "audio_failed", "skipped"}
+                    or (item.status == "audio_ready" and not item.audio_sent)
+                )
+            ]
+        )
+
+    def _dispatch_uniapp_response(self, text: str) -> None:
+        if not getattr(self, "is_uniapp_client", False):
+            return
+        turn = self._create_reply_turn()
+        asyncio.run_coroutine_threadsafe(
+            self._dispatch_sentence_audio_in_order(turn),
+            self.loop,
+        )
+        buffer = text or ""
+        sentences, remaining = self._build_sentences_from_buffer(
+            buffer,
+            force_flush=True,
+            backpressure_active=False,
+        )
+        if remaining.strip():
+            sentences.append(remaining.strip())
+        for idx, item in enumerate(sentences):
+            sentence = self._register_sentence_unit(
+                turn,
+                item,
+                is_final=(idx == len(sentences) - 1),
+            )
+            self._send_sentence_text_chunk(turn, sentence)
+            self._schedule_sentence_audio(turn, sentence)
+        turn.llm_completed = True
+        self._wait_reply_turn_completion(turn)
 
     async def _send_uniapp_reply(self, text: str, message_id: str | None = None):
-        """为 UniApp 客户端发送 JSON 格式的回复"""
-        from core.handle.reportHandle import enqueue_tts_report
-        # 优先入上报队列，避免 websocket 断链导致 AI 回复未落库
-        enqueue_tts_report(self, text, [])  # UniApp 文本回复没有音频
-        try:
-            reply = {
-                "type": "reply",
-                "text": text,
-                "session_id": self.session_id,
-                "state": "complete"
-            }
-            if message_id:
-                reply["message_id"] = message_id
-            
-            # 如果启用了音频，添加音频文件列表（如果有）
-            if getattr(self, 'enable_audio_response', False):
-                audio_files = getattr(self, 'uniapp_audio_files', [])
-                if audio_files:
-                    reply["audio_urls"] = audio_files
-            
-            await self.websocket.send(json.dumps(reply, ensure_ascii=False))
-            self.logger.bind(tag=TAG).info(f"已发送 UniApp 回复: {text[:50]}...")
-        except Exception as e:
-            self.logger.bind(tag=TAG).error(f"发送 UniApp 回复失败: {e}")
+        del message_id
+        await asyncio.get_event_loop().run_in_executor(
+            self.executor,
+            lambda: self._dispatch_uniapp_response(text),
+        )
 
     def _report_worker(self):
         """聊天记录上报工作线程"""
@@ -1719,9 +2699,30 @@ class ConnectionHandler:
         self.client_is_speaking = False
         self.logger.bind(tag=TAG).debug(f"清除服务端讲话状态")
 
+    def abort_current_reply_turn(self) -> None:
+        with self.reply_turn_lock:
+            turn = self.current_reply_turn
+            if turn:
+                turn.aborted = True
+                self._active_reply_message_ids.discard(turn.message_id)
+        self._cleanup_pending_sentence_audio_files()
+
+    def _cleanup_pending_sentence_audio_files(self) -> None:
+        pending_files = list(self._pending_sentence_audio_files)
+        self._pending_sentence_audio_files.clear()
+        for audio_path in pending_files:
+            try:
+                if audio_path and os.path.exists(audio_path):
+                    os.remove(audio_path)
+            except Exception as e:
+                self.logger.bind(tag=TAG).debug(
+                    f"cleanup pending sentence audio failed: path={audio_path} error={e}"
+                )
+
     async def close(self, ws=None):
         """资源清理方法"""
         try:
+            self.abort_current_reply_turn()
             # 清理音频缓冲区
             if hasattr(self, "audio_buffer"):
                 self.audio_buffer.clear()
@@ -1813,6 +2814,7 @@ class ConnectionHandler:
 
     def clear_queues(self):
         """清空所有任务队列"""
+        self.abort_current_reply_turn()
         if self.tts:
             self.logger.bind(tag=TAG).debug(
                 f"开始清理: TTS队列大小={self.tts.tts_text_queue.qsize()}, 音频队列大小={self.tts.tts_audio_queue.qsize()}"

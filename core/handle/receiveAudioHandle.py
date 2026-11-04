@@ -63,7 +63,10 @@ async def startToChat(conn, text):
     else:
         conn.current_speaker = None
 
-    if conn.need_bind:
+    device_id = getattr(conn, "headers", {}).get("device-id")
+    is_uniapp_device = bool(device_id and str(device_id).startswith("uniapp_"))
+
+    if conn.need_bind and not is_uniapp_device:
         await check_bind_device(conn)
         return
 

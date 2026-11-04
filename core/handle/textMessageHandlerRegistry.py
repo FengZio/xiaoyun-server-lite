@@ -8,6 +8,7 @@ from core.handle.textHandler.mcpMessageHandler import McpTextMessageHandler
 from core.handle.textMessageHandler import TextMessageHandler
 from core.handle.textHandler.serverMessageHandler import ServerTextMessageHandler
 from core.handle.textHandler.chatMessageHandler import ChatTextMessageHandler
+from core.handle.textHandler.imageChatMessageHandler import ImageChatTextMessageHandler
 
 TAG = __name__
 
@@ -29,6 +30,7 @@ class TextMessageHandlerRegistry:
             McpTextMessageHandler(),
             ServerTextMessageHandler(),
             ChatTextMessageHandler(),  # 新增 UniApp 聊天处理器
+            ImageChatTextMessageHandler(),
         ]
 
         for handler in handlers:

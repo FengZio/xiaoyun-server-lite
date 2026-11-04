@@ -4,6 +4,7 @@ import torch
 import opuslib_next
 from config.logger import setup_logging
 from core.providers.vad.base import VADProviderBase
+from core.providers.asr.base import ASRProviderBase
 
 TAG = __name__
 logger = setup_logging()
@@ -40,14 +41,22 @@ class VADProvider(VADProviderBase):
     def is_vad(self, conn, audio_data):
         try:
             # ✅ 根据音频格式选择处理方式
-            if conn.audio_format == "pcm":
+            normalized_format = (conn.audio_format or "opus").lower()
+            inferred_format = ASRProviderBase.detect_audio_format([audio_data])
+            if inferred_format and inferred_format != normalized_format:
+                normalized_format = inferred_format
+
+            if normalized_format == "pcm":
                 # PCM 格式，直接使用
                 pcm_frame = audio_data
-            else:
+            elif normalized_format == "opus":
                 # Opus 格式，需要解码
                 if self.decoder is None:
                     self.decoder = opuslib_next.Decoder(16000, 1)
                 pcm_frame = self.decoder.decode(audio_data, 960)
+            else:
+                # 文件型压缩音频（mp3/wav/aac 等）由 ASR 停止阶段统一解码，这里直接放行
+                return True
             conn.client_audio_buffer.extend(pcm_frame)  # 将新数据加入缓冲区
 
             # 处理缓冲区中的完整帧（每次处理512采样点）

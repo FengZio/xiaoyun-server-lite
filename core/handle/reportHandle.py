@@ -10,6 +10,8 @@ TTS上报功能已集成到ConnectionHandler类中。
 """
 
 import time
+import io
+import wave
 
 import opuslib_next
 
@@ -44,7 +46,7 @@ def report(conn, type, text, opus_data, report_time, agent_id=None):
     """
     try:
         if opus_data:
-            audio_data = opus_to_wav(conn, opus_data)
+            audio_data = audio_chunks_to_wav(conn, opus_data)
         else:
             audio_data = None
         # 执行上报
@@ -87,51 +89,23 @@ def report_with_audio_bytes(conn, type, text, audio_bytes, report_time, agent_id
         )
     except Exception as e:
         conn.logger.bind(tag=TAG).error(f"聊天记录二进制音频上报失败: {e}")
-def opus_to_wav(conn, opus_data):
-    """将Opus数据转换为WAV格式的字节流
+def audio_chunks_to_wav(conn, audio_chunks):
+    """将当前连接收到的音频片段统一转换成WAV字节流。"""
+    from core.providers.asr.base import ASRProviderBase
 
-    Args:
-        output_dir: 输出目录（保留参数以保持接口兼容）
-        opus_data: opus音频数据
-
-    Returns:
-        bytes: WAV格式的音频数据
-    """
-    decoder = opuslib_next.Decoder(16000, 1)  # 16kHz, 单声道
-    pcm_data = []
-
-    for opus_packet in opus_data:
-        try:
-            pcm_frame = decoder.decode(opus_packet, 960)  # 960 samples = 60ms
-            pcm_data.append(pcm_frame)
-        except opuslib_next.OpusError as e:
-            conn.logger.bind(tag=TAG).error(f"Opus解码错误: {e}", exc_info=True)
-
+    audio_format = getattr(conn, "audio_format", "opus")
+    pcm_data = ASRProviderBase.normalize_audio_chunks(audio_chunks, audio_format)
     if not pcm_data:
         raise ValueError("没有有效的PCM数据")
 
-    # 创建WAV文件头
     pcm_data_bytes = b"".join(pcm_data)
-    num_samples = len(pcm_data_bytes) // 2  # 16-bit samples
-
-    # WAV文件头
-    wav_header = bytearray()
-    wav_header.extend(b"RIFF")  # ChunkID
-    wav_header.extend((36 + len(pcm_data_bytes)).to_bytes(4, "little"))  # ChunkSize
-    wav_header.extend(b"WAVE")  # Format
-    wav_header.extend(b"fmt ")  # Subchunk1ID
-    wav_header.extend((16).to_bytes(4, "little"))  # Subchunk1Size
-    wav_header.extend((1).to_bytes(2, "little"))  # AudioFormat (PCM)
-    wav_header.extend((1).to_bytes(2, "little"))  # NumChannels
-    wav_header.extend((16000).to_bytes(4, "little"))  # SampleRate
-    wav_header.extend((32000).to_bytes(4, "little"))  # ByteRate
-    wav_header.extend((2).to_bytes(2, "little"))  # BlockAlign
-    wav_header.extend((16).to_bytes(2, "little"))  # BitsPerSample
-    wav_header.extend(b"data")  # Subchunk2ID
-    wav_header.extend(len(pcm_data_bytes).to_bytes(4, "little"))  # Subchunk2Size
-
-    # 返回完整的WAV数据
-    return bytes(wav_header) + pcm_data_bytes
+    wav_buffer = io.BytesIO()
+    with wave.open(wav_buffer, "wb") as wav_file:
+        wav_file.setnchannels(1)
+        wav_file.setsampwidth(2)
+        wav_file.setframerate(16000)
+        wav_file.writeframes(pcm_data_bytes)
+    return wav_buffer.getvalue()
 
 
 def enqueue_tts_report(conn, text, opus_data):

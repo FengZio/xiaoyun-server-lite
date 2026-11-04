@@ -46,9 +46,10 @@ class ASRProvider(ASRProviderBase):
             logger.bind(tag=TAG).error(f"可用内存不足2G，当前仅有 {total_mem / (1024*1024):.2f} MB，可能无法启动FunASR")
         
         self.interface_type = InterfaceType.LOCAL
-        self.model_dir = config.get("model_dir")
+        self.model_dir = config.get("model_dir") or config.get("model_path")
         self.output_dir = config.get("output_dir")  # 修正配置键名
         self.delete_audio_file = delete_audio_file
+        self.language = config.get("language", "auto") or "auto"
 
         # 确保输出目录存在
         os.makedirs(self.output_dir, exist_ok=True)
@@ -71,10 +72,7 @@ class ASRProvider(ASRProviderBase):
         while retry_count < MAX_RETRIES:
             try:
                 # 合并所有opus数据包
-                if audio_format == "pcm":
-                    pcm_data = opus_data
-                else:
-                    pcm_data = self.decode_opus(opus_data)
+                pcm_data = self.normalize_audio_chunks(opus_data, audio_format)
 
                 combined_pcm_data = b"".join(pcm_data)
 
@@ -84,18 +82,16 @@ class ASRProvider(ASRProviderBase):
                     if free_space < len(combined_pcm_data) * 2:  # 预留2倍空间
                         raise OSError("磁盘空间不足")
 
-                # 判断是否保存为WAV文件
-                if self.delete_audio_file:
-                    pass
-                else:
-                    file_path = self.save_audio_to_file(pcm_data, session_id)
+                # FunASR/SenseVoice 官方用法优先传音频文件路径。
+                # 直接传裸 PCM bytes 会导致模型把输入按错误格式解释，出现多语种乱码。
+                file_path = self.save_audio_to_file(pcm_data, session_id)
 
                 # 语音识别
                 start_time = time.time()
                 result = self.model.generate(
-                    input=combined_pcm_data,
+                    input=file_path,
                     cache={},
-                    language="auto",
+                    language=self.language,
                     use_itn=True,
                     batch_size_s=60,
                 )

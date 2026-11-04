@@ -64,12 +64,12 @@ TTS:
   # Xiaomi MiMo TTS
   TTS_xiaomimimo:
     type: xiaomimimo
-    api_url: "https://platform.xiaomimimo.com/open/v1/audio/speech"
+    api_url: "https://api.xiaomimimo.com/v1/chat/completions"
     api_key: "你的小米MiMo密钥"
     model: "mimo-v2-tts"
-    voice: ""
+    voice: "mimo_default"
     format: "mp3"
-    timeout: 60
+    timeout: 8
 
 # ==========================================
 # ASR 配置
@@ -131,6 +131,18 @@ companion:
   speaking_style: "温柔、自然、口语化"
   response_length: "默认2-4句，优先简洁"
   safety_boundary: "不做诊断，不越权，不提供违法危险建议。"
+
+# ==========================================
+# 助手人格表达基线 (qiqing-liuyu)
+# ==========================================
+personality_baseline:
+  enabled: true
+  style: "qiqing-liuyu"
+  assistant_name: "小云"
+  max_chars: 1200
+  anti_ai_tone: true
+  allow_mild_stance: true
+  avoid_fake_human_claims: true
 
 # ==========================================
 # 对话策略层配置 (Dialogue Policy)
@@ -223,6 +235,29 @@ read_config_from_api: false
 
 # 是否删除音频文件
 delete_audio: true
+
+# UniApp 句级语音链路配置
+sentence_pipeline:
+  max_pending_sentences: 4
+  max_rewrite_workers: 1
+  max_tts_workers: 2
+  max_pending_audio_jobs: 3
+  rewrite_timeout: 2.5
+  max_rewrite_sentences: 0
+  rewrite_min_chars: 12
+  min_sentence_chars: 8
+  # 普通聊天：超过 soft_limit 后遇到逗号、顿号、波浪号、省略号等自然停顿即推送
+  sentence_soft_limit: 16
+  # 普通聊天：超过 hard_limit 仍没有自然停顿时强制切出，避免等完整长句
+  sentence_hard_limit: 28
+  # 沉浸模式更偏实时，阈值更短
+  immersive_sentence_soft_limit: 10
+  immersive_sentence_hard_limit: 18
+
+# UniApp 句级音频文件保留与清理
+uniapp_audio_cleanup_enabled: true
+uniapp_audio_retention_seconds: 1800
+uniapp_audio_cleanup_interval_seconds: 300
 
 # 是否启用TTS语音合成（纯软件文本场景可关闭）
 enable_tts: false

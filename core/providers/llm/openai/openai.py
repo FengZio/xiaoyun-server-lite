@@ -1,3 +1,5 @@
+from typing import Any
+
 import httpx
 import openai
 from openai.types import CompletionUsage
@@ -43,11 +45,104 @@ class LLMProvider(LLMProviderBase):
             timeout=httpx.Timeout(self.timeout),
         )
 
+    @staticmethod
+    def _extract_text_parts(content: Any) -> str:
+        if not content:
+            return ""
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            text_parts = []
+            for part in content:
+                if isinstance(part, str):
+                    text_parts.append(part)
+                elif isinstance(part, dict) and part.get("type") == "text":
+                    text_parts.append(part.get("text", ""))
+                else:
+                    text = getattr(part, "text", "")
+                    if text:
+                        text_parts.append(text)
+            return "".join(text_parts)
+        text = getattr(content, "text", "")
+        return text if isinstance(text, str) else ""
+
+    @classmethod
+    def _extract_stream_content(cls, delta: Any) -> str:
+        if delta is None:
+            return ""
+        candidates = [
+            getattr(delta, "content", ""),
+            getattr(delta, "output_text", ""),
+            getattr(delta, "text", ""),
+        ]
+        for candidate in candidates:
+            text = cls._extract_text_parts(candidate)
+            if text:
+                return text
+        return ""
+
+    @classmethod
+    def _extract_reasoning_content(cls, delta: Any) -> str:
+        if delta is None:
+            return ""
+        candidates = [
+            getattr(delta, "reasoning_content", ""),
+            getattr(delta, "reasoning", ""),
+        ]
+        for candidate in candidates:
+            text = cls._extract_text_parts(candidate)
+            if text:
+                return text
+        return ""
+
+    @classmethod
+    def _extract_message_content(cls, message: Any) -> str:
+        if message is None:
+            return ""
+        candidates = [
+            getattr(message, "content", ""),
+            getattr(message, "output_text", ""),
+            getattr(message, "text", ""),
+        ]
+        for candidate in candidates:
+            text = cls._extract_text_parts(candidate)
+            if text:
+                return text
+        return ""
+
+    def _fallback_non_stream_response(self, dialogue, **kwargs) -> str:
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model_name,
+                messages=dialogue,
+                stream=False,
+                max_tokens=kwargs.get("max_tokens", self.max_tokens),
+                temperature=kwargs.get("temperature", self.temperature),
+                top_p=kwargs.get("top_p", self.top_p),
+                frequency_penalty=kwargs.get("frequency_penalty", self.frequency_penalty),
+            )
+            choices = getattr(response, "choices", None) or []
+            if not choices:
+                return ""
+            message = getattr(choices[0], "message", None)
+            content = self._extract_message_content(message)
+            if content:
+                logger.bind(tag=TAG).info(
+                    f"Recovered final answer via non-stream fallback. model={self.model_name}"
+                )
+            return content
+        except Exception as e:
+            logger.bind(tag=TAG).warning(
+                f"Non-stream fallback failed for model={self.model_name}: {e}"
+            )
+            return ""
+
     def response(self, session_id, dialogue, **kwargs):
         try:
             total_chunks = 0
             emitted_chunks = 0
             reasoning_only_chunks = 0
+            reasoning_preview = ""
 
             responses = self.client.chat.completions.create(
                 model=self.model_name,
@@ -65,21 +160,16 @@ class LLMProvider(LLMProviderBase):
 
                 try:
                     delta = chunk.choices[0].delta if getattr(chunk, "choices", None) else None
-                    content = delta.content if hasattr(delta, "content") else ""
-                    reasoning_content = delta.reasoning_content if hasattr(delta, "reasoning_content") else ""
+                    content = self._extract_stream_content(delta)
+                    reasoning_content = self._extract_reasoning_content(delta)
                 except IndexError:
                     content = ""
                     reasoning_content = ""
 
-                if isinstance(content, list):
-                    text_parts = []
-                    for part in content:
-                        if isinstance(part, dict) and part.get("type") == "text":
-                            text_parts.append(part.get("text", ""))
-                    content = "".join(text_parts)
-
                 if not content and reasoning_content:
                     reasoning_only_chunks += 1
+                    if len(reasoning_preview) < 200:
+                        reasoning_preview += reasoning_content
 
                 if content:
                     if "<think>" in content:
@@ -97,8 +187,16 @@ class LLMProvider(LLMProviderBase):
                 logger.bind(tag=TAG).warning(
                     "LLM stream finished with no content chunks. "
                     f"model={self.model_name}, total_chunks={total_chunks}, "
-                    f"reasoning_only_chunks={reasoning_only_chunks}"
+                    f"reasoning_only_chunks={reasoning_only_chunks}, "
+                    f"reasoning_preview={reasoning_preview[:120]!r}"
                 )
+                fallback_content = self._fallback_non_stream_response(dialogue, **kwargs)
+                if fallback_content:
+                    yield fallback_content
+                    return
+                if reasoning_only_chunks > 0:
+                    yield "我刚刚卡住了一下。你再说一句，或者我也可以直接接着刚才的话继续。"
+                    return
 
         except Exception as e:
             logger.bind(tag=TAG).error(f"Error in response generation: {e}")

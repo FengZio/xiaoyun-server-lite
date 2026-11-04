@@ -55,10 +55,7 @@ class ASRProvider(ASRProviderBase):
                 return "", None
 
             # 解码音频（如果原始格式是Opus）
-            if audio_format == "pcm":
-                pcm_data = audio_data
-            else:
-                pcm_data = self.decode_opus(audio_data)
+            pcm_data = self.normalize_audio_chunks(audio_data, audio_format)
                 
             if not pcm_data:
                 logger.bind(tag=TAG).warning("解码后的PCM数据为空，无法进行识别")

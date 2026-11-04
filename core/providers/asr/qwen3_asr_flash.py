@@ -68,10 +68,7 @@ class ASRProvider(ASRProviderBase):
         
         try:
             # 解码音频数据
-            if audio_format == "pcm":
-                pcm_data = opus_data
-            else:
-                pcm_data = self.decode_opus(opus_data)
+            pcm_data = self.normalize_audio_chunks(opus_data, audio_format)
             
             combined_pcm_data = b"".join(pcm_data)
             if len(combined_pcm_data) == 0:
